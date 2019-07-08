@@ -57,8 +57,10 @@ val googleAuthVersion = "0.16.2"
 val http4sVersion = "0.20.4"
 
 // Testing.
+val googleCloudJavaVersion = "1.81.0"
 val scalaMockVersion = "4.2.0"
 val scalaTestVersion = "3.0.8"
+val vaultDriverVersion = "4.1.0"
 
 // Settings to apply to all sub-projects.
 // Can't be applied at the build level because of scoping rules.
@@ -99,6 +101,11 @@ lazy val gcs = project
     libraryDependencies ++= Seq(
       "org.scalatest" %% "scalatest" % scalaTestVersion
     ).map(_ % s"${Test.name},${IntegrationTest.name}"),
+    // Integration tests only.
+    libraryDependencies ++= Seq(
+      "com.bettercloud" % "vault-java-driver" % vaultDriverVersion,
+      "com.google.cloud" % "google-cloud-storage" % googleCloudJavaVersion
+    ).map(_ % IntegrationTest),
     // Pin important transitive dependencies to avoid chaos.
     dependencyOverrides := Seq(
       "co.fs2" %% "fs2-core" % fs2Version,

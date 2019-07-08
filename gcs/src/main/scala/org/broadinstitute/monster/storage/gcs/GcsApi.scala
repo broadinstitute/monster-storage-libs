@@ -84,7 +84,7 @@ object GcsApi {
 
   /** Build the JSON API endpoint for a bucket/path in GCS. */
   def baseGcsUri(bucket: String, path: String): Uri =
-    Uri.unsafeFromString(s"https://www.googleapis.com/storage/v1/b/$bucket/o/$path")
+    Uri.unsafeFromString(s"https://www.googleapis.com/storage/v1/b/$bucket/o") / path
 
   private val bytesPerMib = 1048576
 

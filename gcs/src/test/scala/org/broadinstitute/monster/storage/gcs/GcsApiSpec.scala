@@ -7,12 +7,11 @@ import org.http4s.headers.Authorization
 import org.scalatest.{FlatSpec, Matchers}
 
 class GcsApiSpec extends FlatSpec with Matchers {
-  behavior of "GcsApi"
 
   private val bucket = "bucket"
   private val path = "the/path"
   private val getUri =
-    uri"https://www.googleapis.com/storage/v1/b/bucket/o/the/path?alt=media"
+    uri"https://www.googleapis.com/storage/v1/b/bucket/o/the%2Fpath?alt=media"
   private val bodyText =
     s"""Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor
        |incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud
@@ -26,6 +25,8 @@ class GcsApiSpec extends FlatSpec with Matchers {
 
   private val auth: GcsAuthProvider =
     (req: Request[IO]) => IO.pure(req.transformHeaders(_.put(fakeAuth)))
+
+  behavior of "GcsApi"
 
   it should "read entire objects as a stream" in {
     val api = new GcsApi(auth, req => {
