@@ -1,9 +1,12 @@
 package org.broadinstitute.monster.storage.gcs
 
+import java.nio.file.Path
+
 import cats.data.NonEmptyList
-import cats.effect.IO
+import cats.effect.{Clock, ContextShift, IO}
 import fs2.Stream
 import org.http4s._
+import org.http4s.client.Client
 import org.http4s.headers.{Range, `Accept-Encoding`}
 
 /**
@@ -81,6 +84,21 @@ class GcsApi private[gcs] (
 }
 
 object GcsApi {
+
+  /**
+   * Construct a GCS client which will delegate to a given HTTP client when sending requests,
+   * optionally using service account credentials for authorization instead of the environment's
+   * application default credentials.
+   *
+   * @param httpClient client which will actually send / receive HTTP requests to / from GCS
+   * @param serviceAccountJson optional path to service account credentials on disk, to use
+   *                           in place of application default credentials
+   */
+  def build(
+    httpClient: Client[IO],
+    serviceAccountJson: Option[Path]
+  )(implicit cs: ContextShift[IO], clk: Clock[IO]): IO[GcsApi] =
+    GcsAuthProvider.build(serviceAccountJson).map(new GcsApi(_, httpClient.stream))
 
   /** Build the JSON API endpoint for an existing bucket/path in GCS. */
   def baseGcsUri(bucket: String, path: String): Uri =

@@ -49,8 +49,6 @@ class GcsApiIntegrationSpec extends FlatSpec with Matchers with BeforeAndAfterAl
 
   override def afterAll(): Unit = Files.delete(writerJson)
 
-  private val authProvider = GcsAuthProvider.build(Some(writerJson))
-
   private val gcsClient = StorageOptions
     .newBuilder()
     .setCredentials(
@@ -58,6 +56,11 @@ class GcsApiIntegrationSpec extends FlatSpec with Matchers with BeforeAndAfterAl
     )
     .build()
     .getService
+
+  private def withClient[T](run: GcsApi => IO[T]): IO[T] =
+    BlazeClientBuilder[IO](ExecutionContext.global).resource.use { http =>
+      GcsApi.build(http, Some(writerJson)).flatMap(run)
+    }
 
   behavior of "GcsApi"
 
@@ -75,19 +78,15 @@ class GcsApiIntegrationSpec extends FlatSpec with Matchers with BeforeAndAfterAl
       ()
     }
 
-    val readText = Resource
-      .make(setup)(_ => teardown)
-      .flatMap(_ => BlazeClientBuilder[IO](ExecutionContext.global).resource)
-      .use { httpClient =>
-        authProvider.map(new GcsApi(_, httpClient.stream)).flatMap { api =>
-          api
-            .readObject(bucket, blobPath)
-            .through(fs2.text.utf8Decode)
-            .compile
-            .toChunk
-            .map(_.toArray[String].mkString(""))
-        }
+    val readText = Resource.make(setup)(_ => teardown).use { _ =>
+      withClient {
+        _.readObject(bucket, blobPath)
+          .through(fs2.text.utf8Decode)
+          .compile
+          .toChunk
+          .map(_.toArray[String].mkString(""))
       }
+    }
 
     readText.unsafeRunSync() shouldBe bodyText
   }
@@ -116,20 +115,16 @@ class GcsApiIntegrationSpec extends FlatSpec with Matchers with BeforeAndAfterAl
       ()
     }
 
-    val readText = Resource
-      .make(setup)(_ => teardown)
-      .flatMap(_ => BlazeClientBuilder[IO](ExecutionContext.global).resource)
-      .use { httpClient =>
-        authProvider.map(new GcsApi(_, httpClient.stream)).flatMap { api =>
-          api
-            .readObject(bucket, blobPath)
-            .through(fs2.compress.gunzip(1024 * 1024))
-            .through(fs2.text.utf8Decode)
-            .compile
-            .toChunk
-            .map(_.toArray[String].mkString(""))
-        }
+    val readText = Resource.make(setup)(_ => teardown).use { _ =>
+      withClient {
+        _.readObject(bucket, blobPath)
+          .through(fs2.compress.gunzip(1024 * 1024))
+          .through(fs2.text.utf8Decode)
+          .compile
+          .toChunk
+          .map(_.toArray[String].mkString(""))
       }
+    }
 
     readText.unsafeRunSync() shouldBe bodyText
   }
