@@ -7,6 +7,7 @@ import cats.effect.{ContextShift, IO, Resource, Timer}
 import com.bettercloud.vault.{Vault, VaultConfig}
 import com.google.auth.oauth2.ServiceAccountCredentials
 import com.google.cloud.storage.{BlobId, BlobInfo, StorageOptions}
+import fs2.Stream
 import org.http4s.client.blaze.BlazeClientBuilder
 import org.scalatest.{BeforeAndAfterAll, FlatSpec, Matchers}
 
@@ -81,6 +82,48 @@ class GcsApiIntegrationSpec extends FlatSpec with Matchers with BeforeAndAfterAl
         authProvider.map(new GcsApi(_, httpClient.stream)).flatMap { api =>
           api
             .readObject(bucket, blobPath)
+            .through(fs2.text.utf8Decode)
+            .compile
+            .toChunk
+            .map(_.toArray[String].mkString(""))
+        }
+      }
+
+    readText.unsafeRunSync() shouldBe bodyText
+  }
+
+  it should "read gzipped data as-is, with no server-side decompression" in {
+    val blobPath = s"test/${OffsetDateTime.now()}/lorem.ipsum.gz"
+    val blob = BlobId.of(bucket, blobPath)
+    val blobInfo = BlobInfo
+      .newBuilder(blob)
+      .setContentType("text/plain")
+      .setContentEncoding("gzip")
+      .build()
+
+    val setup = Stream
+      .emits(bodyText.getBytes)
+      .covary[IO]
+      .through(fs2.compress.gzip(1024 * 1024))
+      .compile
+      .toChunk
+      .flatMap { zippedBytes =>
+        IO.delay(gcsClient.create(blobInfo, zippedBytes.toArray[Byte]))
+      }
+      .map(_ => ())
+    val teardown = IO.delay {
+      gcsClient.delete(blob)
+      ()
+    }
+
+    val readText = Resource
+      .make(setup)(_ => teardown)
+      .flatMap(_ => BlazeClientBuilder[IO](ExecutionContext.global).resource)
+      .use { httpClient =>
+        authProvider.map(new GcsApi(_, httpClient.stream)).flatMap { api =>
+          api
+            .readObject(bucket, blobPath)
+            .through(fs2.compress.gunzip(1024 * 1024))
             .through(fs2.text.utf8Decode)
             .compile
             .toChunk

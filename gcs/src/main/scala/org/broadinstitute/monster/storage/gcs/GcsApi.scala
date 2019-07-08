@@ -82,9 +82,11 @@ class GcsApi private[gcs] (
 
 object GcsApi {
 
-  /** Build the JSON API endpoint for a bucket/path in GCS. */
+  /** Build the JSON API endpoint for an existing bucket/path in GCS. */
   def baseGcsUri(bucket: String, path: String): Uri =
-    Uri.unsafeFromString(s"https://www.googleapis.com/storage/v1/b/$bucket/o") / path
+    // NOTE: Calls to the `/` method cause the RHS to be URL-encoded.
+    // This is the correct behavior in this case, but it can cause confusion.
+    uri"https://www.googleapis.com/storage/v1/b/" / bucket / "o" / path
 
   private val bytesPerMib = 1048576
 
