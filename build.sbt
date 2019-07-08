@@ -82,24 +82,28 @@ lazy val `monster-storage-libs` = project
 
 lazy val gcs = project
   .in(file("gcs"))
+  .configs(IntegrationTest)
   .settings(commonSettings)
   .settings(
+    Defaults.itSettings,
+    // Main code.
     libraryDependencies ++= Seq(
       "ch.qos.logback" % "logback-classic" % logbackVersion,
       "com.google.auth" % "google-auth-library-oauth2-http" % googleAuthVersion,
       "io.circe" %% "circe-core" % circeVersion,
       "io.circe" %% "circe-derivation" % circeDerivationVersion,
       "io.circe" %% "circe-parser" % circeVersion,
-      "org.http4s" %% "http4s-blaze-client" % http4sVersion,
+      "org.http4s" %% "http4s-blaze-client" % http4sVersion
     ),
+    // All tests.
     libraryDependencies ++= Seq(
-      "org.scalamock" %% "scalamock" % scalaMockVersion,
-      "org.scalatest" %% "scalatest" % scalaTestVersion,
-    ).map(_ % Test),
+      "org.scalatest" %% "scalatest" % scalaTestVersion
+    ).map(_ % s"${Test.name},${IntegrationTest.name}"),
+    // Pin important transitive dependencies to avoid chaos.
     dependencyOverrides := Seq(
       "co.fs2" %% "fs2-core" % fs2Version,
       "co.fs2" %% "fs2-io" % fs2Version,
       "org.typelevel" %% "cats-core" % catsVersion,
-      "org.typelevel" %% "cats-effect" % catsEffectVersion,
+      "org.typelevel" %% "cats-effect" % catsEffectVersion
     )
   )

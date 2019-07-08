@@ -15,68 +15,11 @@ import org.http4s.headers.Authorization
 
 /**
   * Utility which can add authorization info for Google Cloud to outgoing HTTP requests.
-  *
-  * @param googleCreds google creds client, pre-loaded to point at either default credentials
-  *                    or service account credentials
-  * @param credsLock lock for refreshing the raw google creds
   */
-class GcsAuthProvider private (
-  googleCreds: OAuth2Credentials,
-  credsLock: Semaphore[IO]
-)(implicit clk: Clock[IO]) {
+trait GcsAuthProvider {
 
   /** Add authorization for GCP to an HTTP request. */
-  def addAuth(request: Request[IO]): IO[Request[IO]] =
-    accessToken.map { bearerToken =>
-      val creds = Credentials.Token(AuthScheme.Bearer, bearerToken)
-      request.transformHeaders(_.put(Authorization(creds)))
-    }
-
-  /**
-    * Get an access token from the base Google credentials.
-    *
-    * The token will be refreshed if expired.
-    */
-  private def accessToken: IO[String] =
-    for {
-      now <- clk
-        .realTime(scala.concurrent.duration.MILLISECONDS)
-        .map(Instant.ofEpochMilli)
-      // Lock around the refresh check to prevent double-refreshes.
-      _ <- credsLock.acquire.bracket(_ => maybeRefreshToken(now))(_ => credsLock.release)
-      accessToken <- IO.delay(googleCreds.getAccessToken)
-    } yield {
-      accessToken.getTokenValue
-    }
-
-  /**
-    * Check if the access token for the base Google credentials has expired,
-    * and refresh it if so.
-    */
-  private def maybeRefreshToken(now: Instant): IO[Unit] = {
-
-    val maybeExpirationInstant = for {
-      token <- Option(googleCreds.getAccessToken)
-      expiration <- Option(token.getExpirationTime)
-    } yield {
-      expiration.toInstant
-    }
-
-    /*
-     * Token is valid if:
-     *   1. It's not null, and
-     *   2. Its expiration time hasn't passed
-     *
-     * We pretend the token expires a second early to give some wiggle-room.
-     */
-    val tokenIsValid = maybeExpirationInstant.exists(_.minusSeconds(1).isAfter(now))
-
-    if (tokenIsValid) {
-      IO.unit
-    } else {
-      IO.delay(googleCreds.refresh())
-    }
-  }
+  def addAuth(request: Request[IO]): IO[Request[IO]]
 }
 
 object GcsAuthProvider {
@@ -117,5 +60,73 @@ object GcsAuthProvider {
   private[gcs] def apply(credentials: OAuth2Credentials)(
     implicit c: Concurrent[IO],
     clk: Clock[IO]
-  ): IO[GcsAuthProvider] = Semaphore[IO](1L).map(new GcsAuthProvider(credentials, _))
+  ): IO[GcsAuthProvider] = Semaphore[IO](1L).map(new Impl(credentials, _))
+
+  /**
+    * Concrete implementation of a utility that provide authorization headers for requests go GCS.
+    *
+    * @param googleCreds google creds client, pre-loaded to point at either default credentials
+    *                    or service account credentials
+    * @param credsLock lock for refreshing the raw google creds
+    */
+  private class Impl(
+    googleCreds: OAuth2Credentials,
+    credsLock: Semaphore[IO]
+  )(implicit clk: Clock[IO])
+      extends GcsAuthProvider {
+
+    override def addAuth(request: Request[IO]): IO[Request[IO]] =
+      accessToken.map { bearerToken =>
+        val creds = Credentials.Token(AuthScheme.Bearer, bearerToken)
+        request.transformHeaders(_.put(Authorization(creds)))
+      }
+
+    /**
+      * Get an access token from the base Google credentials.
+      *
+      * The token will be refreshed if expired.
+      */
+    private def accessToken: IO[String] =
+      for {
+        now <- clk
+          .realTime(scala.concurrent.duration.MILLISECONDS)
+          .map(Instant.ofEpochMilli)
+        // Lock around the refresh check to prevent double-refreshes.
+        _ <- credsLock.acquire.bracket(_ => maybeRefreshToken(now))(
+          _ => credsLock.release
+        )
+        accessToken <- IO.delay(googleCreds.getAccessToken)
+      } yield {
+        accessToken.getTokenValue
+      }
+
+    /**
+      * Check if the access token for the base Google credentials has expired,
+      * and refresh it if so.
+      */
+    private def maybeRefreshToken(now: Instant): IO[Unit] = {
+
+      val maybeExpirationInstant = for {
+        token <- Option(googleCreds.getAccessToken)
+        expiration <- Option(token.getExpirationTime)
+      } yield {
+        expiration.toInstant
+      }
+
+      /*
+       * Token is valid if:
+       *   1. It's not null, and
+       *   2. Its expiration time hasn't passed
+       *
+       * We pretend the token expires a second early to give some wiggle-room.
+       */
+      val tokenIsValid = maybeExpirationInstant.exists(_.minusSeconds(1).isAfter(now))
+
+      if (tokenIsValid) {
+        IO.unit
+      } else {
+        IO.delay(googleCreds.refresh())
+      }
+    }
+  }
 }

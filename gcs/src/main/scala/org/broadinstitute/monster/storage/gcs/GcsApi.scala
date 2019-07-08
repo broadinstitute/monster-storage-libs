@@ -5,16 +5,19 @@ import cats.effect.IO
 import fs2.Stream
 import org.http4s._
 import org.http4s.headers.{Range, `Accept-Encoding`}
-import org.http4s.client.Client
 
 /**
   * Client which can perform I/O operations against Google Cloud Storage.
   *
-  * @param httpClient client which can actually send/receive HTTP
   * @param authProvider utility which can add GCS-specific authorization headers
   *                     to outgoing HTTP requests
+  * @param runHttp function which can transform HTTP requests into HTTP responses
+  *                (bracketed by connection-management code)
   */
-class GcsApi private[gcs] (httpClient: Client[IO], authProvider: GcsAuthProvider) {
+class GcsApi private[gcs] (
+  authProvider: GcsAuthProvider,
+  runHttp: Request[IO] => Stream[IO, Response[IO]]
+) {
   import GcsApi._
 
   /**
@@ -48,9 +51,8 @@ class GcsApi private[gcs] (httpClient: Client[IO], authProvider: GcsAuthProvider
 
     // Tell GCS that we're OK accepting gzipped data to prevent it from trying to
     // decompress on the server-side, because that breaks use of the 'Range' header.
-    val accept = `Accept-Encoding`(
-      NonEmptyList.of(ContentCoding.identity, ContentCoding.gzip, ContentCoding.`x-gzip`)
-    )
+    val accept =
+      `Accept-Encoding`(NonEmptyList.of(ContentCoding.identity, ContentCoding.gzip))
 
     val request = Request[IO](
       method = Method.GET,
@@ -60,7 +62,7 @@ class GcsApi private[gcs] (httpClient: Client[IO], authProvider: GcsAuthProvider
 
     Stream
       .eval(authProvider.addAuth(request))
-      .flatMap(httpClient.stream)
+      .flatMap(runHttp)
       .flatMap { response =>
         if (response.status.isSuccess) {
           response.body
