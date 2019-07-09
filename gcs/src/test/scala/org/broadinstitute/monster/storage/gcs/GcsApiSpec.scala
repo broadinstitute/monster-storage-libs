@@ -79,7 +79,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
       req.headers.toList should contain theSameElementsAs List(
         fakeAuth,
         Header("Accept-Encoding", "identity, gzip"),
-        Header("Range", s"bytes=0-$end")
+        Header("Range", s"bytes=0-${end - 1}")
       )
       Stream.emit(Response[IO](body = bodyStream))
     })
@@ -102,7 +102,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
       req.headers.toList should contain theSameElementsAs List(
         fakeAuth,
         Header("Accept-Encoding", "identity, gzip"),
-        Header("Range", s"bytes=$start-$end")
+        Header("Range", s"bytes=$start-${end - 1}")
       )
       Stream.emit(Response[IO](body = bodyStream))
     })
