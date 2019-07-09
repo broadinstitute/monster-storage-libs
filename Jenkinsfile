@@ -7,9 +7,7 @@ pipeline {
         disableConcurrentBuilds()
     }
     environment {
-        PATH = "${tool('sbt')}:${tool('vault')}:$PATH"
-        VAULT_ADDR = "${sh(returnStdout: true, script: 'echo ${VAULT_ADDR}')}"
-        VAULT_TOKEN_PATH = "${sh(returnStdout: true, script: 'echo ${VAULT_TOKEN_PATH}')}"
+        PATH = "${tool('sbt')}:$PATH"
     }
     stages {
         stage('Check formatting') {
@@ -28,8 +26,15 @@ pipeline {
             }
         }
         stage('Integration Test') {
+            environment {
+                // Some wiring is broken between the custom-tools plugin and
+                // the pipeline plugin which prevents these vars from being
+                // injected when pulling in the custom 'vault' tool.
+                VAULT_ADDR = 'https://clotho.broadinstitute.org:8200'
+                VAULT_TOKEN_PATH = '/etc/vault-token-monster'
+            }
             steps {
-                sh "VAULT_ADDR='${env.VAULT_ADDR}' VAULT_TOKEN=\$(cat ${env.VAULT_TOKEN_PATH}) sbt IntegrationTest/test"
+                sh 'sbt IntegrationTest/test'
             }
         }
     }

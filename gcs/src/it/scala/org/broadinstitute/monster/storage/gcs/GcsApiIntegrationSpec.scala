@@ -36,15 +36,12 @@ class GcsApiIntegrationSpec
        |""".stripMargin
 
   private val writerJson = {
-    val vaultToken = sys.env
-      .getOrElse(
-        "VAULT_TOKEN",
-        new String(Files.readAllBytes(Paths.get(sys.env("HOME"), ".vault-token")))
-      )
-      .trim()
+    val tokenPath = sys.env
+      .get("VAULT_TOKEN_PATH")
+      .fold(Paths.get(sys.env("HOME"), ".vault-token"))(Paths.get(_))
 
     val config = new VaultConfig()
-      .token(vaultToken)
+      .token(new String(Files.readAllBytes(tokenPath)))
       .engineVersion(1)
       .build()
 
