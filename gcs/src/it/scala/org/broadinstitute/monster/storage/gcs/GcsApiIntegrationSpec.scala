@@ -41,7 +41,7 @@ class GcsApiIntegrationSpec
       .fold(Paths.get(sys.env("HOME"), ".vault-token"))(Paths.get(_))
 
     val config = new VaultConfig()
-      .token(new String(Files.readAllBytes(tokenPath)))
+      .token(new String(Files.readAllBytes(tokenPath)).trim())
       .engineVersion(1)
       .build()
 
