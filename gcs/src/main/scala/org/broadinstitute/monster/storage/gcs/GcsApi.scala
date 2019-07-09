@@ -28,17 +28,16 @@ class GcsApi private[gcs] (
     *
     * @param bucket name of the GCS bucket to read from
     * @param path path within `bucket` containing the object-to-read
-    * @param startByte first byte (zero-indexed) within the object at `path` which should be
-    *                  included in the response from GCS
-    * @param endByte final byte (zero-indexed) within the object at `path` which should be
-    *                included in the response from GCS, or `None` if GCS should attempt to
-    *                return all bytes following the start of the range
+    * @param fromByte first byte (zero-indexed, inclusive) within the object at `path`
+    *                 which should be included in the response from GCS
+    * @param untilByte exclusive endpoint for the bytes returned from the object at `path`,
+    *                  or `None` if all bytes should be returned
     */
   def readObject(
     bucket: String,
     path: String,
-    startByte: Long = 0L,
-    endByte: Option[Long] = None
+    fromByte: Long = 0L,
+    untilByte: Option[Long] = None
   ): Stream[IO, Byte] = {
     val objectUri = baseGcsUri(bucket, path).withQueryParam("alt", "media")
     /*
@@ -55,7 +54,8 @@ class GcsApi private[gcs] (
      * and when requests fail they see how much data has actually been transferred
      * and retry from that point.
      */
-    val range = Header("Range", s"bytes=$startByte-${endByte.fold("")(_.toString)}")
+    val range =
+      Header("Range", s"bytes=$fromByte-${untilByte.fold("")(b => (b - 1).toString)}")
 
     // Tell GCS that we're OK accepting gzipped data to prevent it from trying to
     // decompress on the server-side, because that breaks use of the 'Range' header.

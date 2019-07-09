@@ -63,7 +63,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
     })
 
     api
-      .readObject(bucket, path, startByte = start)
+      .readObject(bucket, path, fromByte = start)
       .through(fs2.text.utf8Decode)
       .compile
       .toChunk
@@ -85,7 +85,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
     })
 
     api
-      .readObject(bucket, path, endByte = Some(end))
+      .readObject(bucket, path, untilByte = Some(end))
       .through(fs2.text.utf8Decode)
       .compile
       .toChunk
@@ -108,7 +108,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
     })
 
     api
-      .readObject(bucket, path, startByte = start, endByte = Some(end))
+      .readObject(bucket, path, fromByte = start, untilByte = Some(end))
       .through(fs2.text.utf8Decode)
       .compile
       .toChunk
