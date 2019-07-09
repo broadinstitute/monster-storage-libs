@@ -9,6 +9,7 @@ import com.google.auth.oauth2.ServiceAccountCredentials
 import com.google.cloud.storage.{BlobId, BlobInfo, StorageOptions}
 import fs2.Stream
 import org.http4s.client.blaze.BlazeClientBuilder
+import org.http4s.client.middleware.Logger
 import org.scalatest.{BeforeAndAfterAll, FlatSpec, Matchers}
 
 import scala.concurrent.ExecutionContext
@@ -26,7 +27,8 @@ class GcsApiIntegrationSpec extends FlatSpec with Matchers with BeforeAndAfterAl
        |exercitation ullamco laboris nisi ut aliquip ex ea commodo consequat. Duis aute
        |irure dolor in reprehenderit in voluptate velit esse cillum dolore eu fugiat nulla
        |pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia
-       |deserunt mollit anim id est laborum.""".stripMargin
+       |deserunt mollit anim id est laborum.
+       |""".stripMargin
 
   private val writerJson = {
     val tokenPath = sys.env
@@ -59,7 +61,7 @@ class GcsApiIntegrationSpec extends FlatSpec with Matchers with BeforeAndAfterAl
 
   private def withClient[T](run: GcsApi => IO[T]): IO[T] =
     BlazeClientBuilder[IO](ExecutionContext.global).resource.use { http =>
-      GcsApi.build(http, Some(writerJson)).flatMap(run)
+      GcsApi.build(Logger(logHeaders = true, logBody = false)(http), Some(writerJson)).flatMap(run)
     }
 
   behavior of "GcsApi"
@@ -130,7 +132,30 @@ class GcsApiIntegrationSpec extends FlatSpec with Matchers with BeforeAndAfterAl
   }
 
   it should "read objects starting at an offset" in {
-    ???
+    val blobPath = s"test/${OffsetDateTime.now()}/lorem.ipsum"
+    val blob = BlobId.of(bucket, blobPath)
+    val blobInfo = BlobInfo.newBuilder(blob).setContentType("text/plain").build()
+
+    val setup = IO.delay {
+      gcsClient.create(blobInfo, bodyText.getBytes)
+      ()
+    }
+    val teardown = IO.delay {
+      gcsClient.delete(blob)
+      ()
+    }
+
+    val readText = Resource.make(setup)(_ => teardown).use { _ =>
+      withClient {
+        _.readObject(bucket, blobPath, startByte = 128L)
+          .through(fs2.text.utf8Decode)
+          .compile
+          .toChunk
+          .map(_.toArray[String].mkString(""))
+      }
+    }
+
+    readText.unsafeRunSync() shouldBe new String(bodyText.getBytes.drop(128))
   }
 
   it should "read objects ending before the final byte" in {

@@ -7,7 +7,7 @@ import cats.effect.{Clock, ContextShift, IO}
 import fs2.Stream
 import org.http4s._
 import org.http4s.client.Client
-import org.http4s.headers.{Range, `Accept-Encoding`}
+import org.http4s.headers.`Accept-Encoding`
 
 /**
   * Client which can perform I/O operations against Google Cloud Storage.
@@ -42,6 +42,11 @@ class GcsApi private[gcs] (
   ): Stream[IO, Byte] = {
     val objectUri = baseGcsUri(bucket, path).withQueryParam("alt", "media")
     /*
+     * NOTE: We don't use http4s' `Range` type for this header because when it
+     * renders ranges without an endpoint it omits the trailing '-'. The HTTP
+     * spec seems to say that both forms are equivalent, but GCS only recognizes
+     * the form with the trailing '-'.
+     *
      * TODO: Instead of a one-shot request for all the bytes, we can be more
      * sophisticated and send a sequence of requests with a constant range size
      * that we believe is much less likely to flap from transient problems.
@@ -50,7 +55,7 @@ class GcsApi private[gcs] (
      * and when requests fail they see how much data has actually been transferred
      * and retry from that point.
      */
-    val range = Range(RangeUnit.Bytes, Range.SubRange(startByte, endByte))
+    val range = Header("Range", s"bytes=$startByte-${endByte.fold("")(_.toString)}")
 
     // Tell GCS that we're OK accepting gzipped data to prevent it from trying to
     // decompress on the server-side, because that breaks use of the 'Range' header.
@@ -86,14 +91,14 @@ class GcsApi private[gcs] (
 object GcsApi {
 
   /**
-   * Construct a GCS client which will delegate to a given HTTP client when sending requests,
-   * optionally using service account credentials for authorization instead of the environment's
-   * application default credentials.
-   *
-   * @param httpClient client which will actually send / receive HTTP requests to / from GCS
-   * @param serviceAccountJson optional path to service account credentials on disk, to use
-   *                           in place of application default credentials
-   */
+    * Construct a GCS client which will delegate to a given HTTP client when sending requests,
+    * optionally using service account credentials for authorization instead of the environment's
+    * application default credentials.
+    *
+    * @param httpClient client which will actually send / receive HTTP requests to / from GCS
+    * @param serviceAccountJson optional path to service account credentials on disk, to use
+    *                           in place of application default credentials
+    */
   def build(
     httpClient: Client[IO],
     serviceAccountJson: Option[Path]
