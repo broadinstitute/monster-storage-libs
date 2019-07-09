@@ -7,7 +7,7 @@ pipeline {
         disableConcurrentBuilds()
     }
     environment {
-        PATH = "${tool('sbt')}:$PATH"
+        PATH = "${tool('sbt')}:${tool('vault')}:$PATH"
     }
     stages {
         stage('Check formatting') {
@@ -26,9 +26,6 @@ pipeline {
             }
         }
         stage('Integration Test') {
-            environment {
-                PATH = "${tool('vault')}:$PATH"
-            }
             steps {
                 sh 'sbt IntegrationTest/test'
             }
