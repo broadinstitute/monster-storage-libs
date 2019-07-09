@@ -27,7 +27,7 @@ pipeline {
         }
         stage('Integration Test') {
             steps {
-                sh 'VAULT_TOKEN=$(cat ${VAULT_TOKEN_PATH}) sbt IntegrationTest/test'
+                sh "VAULT_ADDR='${env.VAULT_ADDR}' VAULT_TOKEN=\$(cat ${env.VAULT_TOKEN_PATH}) sbt IntegrationTest/test"
             }
         }
     }
