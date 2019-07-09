@@ -8,6 +8,8 @@ pipeline {
     }
     environment {
         PATH = "${tool('sbt')}:${tool('vault')}:$PATH"
+        VAULT_ADDR = "${sh(returnStdout: true, script: 'echo ${VAULT_ADDR}')}"
+        VAULT_TOKEN_PATH = "${sh(returnStdout: true, script: 'echo ${VAULT_TOKEN_PATH}')}"
     }
     stages {
         stage('Check formatting') {
