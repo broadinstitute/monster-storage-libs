@@ -26,6 +26,10 @@ class GcsApiIntegrationSpec
 
   private val bucket = "broad-dsp-monster-dev-integration-test-data"
 
+  /*
+   * NOTE: This is lorem ipsum because it needs to be large enough to meaningfully test
+   * GCS's range downloads, and I was too lazy to come up with my own paragraph of text.
+   */
   private val bodyText =
     s"""Lorem ipsum dolor sit amet, consectetur adipiscing elit, sed do eiusmod tempor
        |incididunt ut labore et dolore magna aliqua. Ut enim ad minim veniam, quis nostrud
