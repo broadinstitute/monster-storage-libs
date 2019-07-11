@@ -54,10 +54,10 @@ val logbackVersion = "1.2.3"
 
 // Web.
 val googleAuthVersion = "0.16.2"
-val http4sVersion = "0.20.4"
+val http4sVersion = "0.20.6"
 
 // Testing.
-val googleCloudJavaVersion = "1.81.0"
+val googleCloudJavaVersion = "1.82.0"
 val scalaMockVersion = "4.2.0"
 val scalaTestVersion = "3.0.8"
 val vaultDriverVersion = "4.1.0"

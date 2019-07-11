@@ -7,7 +7,7 @@ import cats.effect.{Clock, ContextShift, IO}
 import fs2.Stream
 import org.http4s._
 import org.http4s.client.Client
-import org.http4s.headers.`Accept-Encoding`
+import org.http4s.headers.{`Accept-Encoding`, `Content-Encoding`}
 
 /**
   * Client which can perform I/O operations against Google Cloud Storage.
@@ -37,7 +37,8 @@ class GcsApi private[gcs] (
     bucket: String,
     path: String,
     fromByte: Long = 0L,
-    untilByte: Option[Long] = None
+    untilByte: Option[Long] = None,
+    gunzipIfNeeded: Boolean = false
   ): Stream[IO, Byte] = {
     val objectUri = baseGcsUri(bucket, path).withQueryParam("alt", "media")
     /*
@@ -72,7 +73,14 @@ class GcsApi private[gcs] (
       .eval(authProvider.addAuth(request))
       .flatMap(runHttp)
       .flatMap { response =>
-        if (response.status.isSuccess) {
+        if (response.status.isSuccess && gunzipIfNeeded) {
+          response.headers.get(`Content-Encoding`) match {
+            case Some(header)
+                if header.contentCoding == ContentCoding.gzip || header.contentCoding == ContentCoding.`x-gzip` =>
+              response.body.through(fs2.compress.gunzip(GunzipBufferSize))
+            case _ => response.body
+          }
+        } else if (response.status.isSuccess) {
           response.body
         } else {
           val fullBody =
@@ -111,7 +119,8 @@ object GcsApi {
     // This is the correct behavior in this case, but it can cause confusion.
     uri"https://www.googleapis.com/storage/v1/b/" / bucket / "o" / path
 
-  private val bytesPerMib = 1048576
+  private val bytesPerKib = 1024
+  private val bytesPerMib = 1024 * bytesPerKib
 
   /**
     * Max number of bytes to send in a single request to GCS.
@@ -120,4 +129,16 @@ object GcsApi {
     * to a resumable upload.
     */
   val MaxBytesPerUploadRequest: Int = 5 * bytesPerMib
+
+  /**
+    * Buffer size for client-side gunzipping of compressed data pulled from GCS.
+    *
+    * The guidelines for this size aren't super clear. They say:
+    *   1. Larger than 8KB
+    *   2. Around the size of the largest chunk in the gzipped stream
+    *
+    * GCS's resumable upload docs say upload chunks should be in multiples of 256KB,
+    * so it seems like a safe bet for a magic number.
+    */
+  val GunzipBufferSize: Int = 256 * bytesPerKib
 }

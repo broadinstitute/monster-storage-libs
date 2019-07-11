@@ -94,17 +94,6 @@ class GcsApiIntegrationSpec
     val blobInfo = BlobInfo
       .newBuilder(blob)
       .setContentType("text/plain")
-      /*
-       * For users hosting static content in buckets, GCS offers the
-       * convenience of server-side decompression for objects with a
-       * content-encoding set to 'gzip'. This feature kicks in automatically
-       * on GET requests to any gzipped object unless the client signals
-       * that it's OK accepting gzip data.
-       *
-       * This feature breaks use of the 'Range' header, which is what
-       * we use to support reading chunks of data from GCS at a time, so
-       * we want to be sure it's always disabled.
-       */
       .setContentEncoding("gzip")
       .build()
 
@@ -137,13 +126,44 @@ class GcsApiIntegrationSpec
     }.unsafeRunSync() shouldBe bodyText
   }
 
-  it should "read gzipped data as-is, with no server-side decompression" in {
+  /*
+   * For users hosting static content in buckets, GCS offers the
+   * convenience of server-side decompression for objects with a
+   * content-encoding set to 'gzip'. This feature kicks in automatically
+   * on GET requests to any gzipped object unless the client signals
+   * that it's OK accepting gzip data.
+   *
+   * This feature breaks use of the 'Range' header, which is what
+   * we use to support reading chunks of data from GCS at a time, so
+   * we want to be sure it's always disabled.
+   */
+  it should "read gzipped data as-is, with no decompression" in {
     writeGzippedTestFile.use { blob =>
       withClient { api =>
         buildString {
           api
             .readObject(blob.getBucket, blob.getName)
             .through(fs2.compress.gunzip(1024 * 1024))
+        }
+      }
+    }.unsafeRunSync() shouldBe bodyText
+  }
+
+  it should "read gzipped data with client-side decompression" in {
+    writeGzippedTestFile.use { blob =>
+      withClient { api =>
+        buildString {
+          api.readObject(blob.getBucket, blob.getName, gunzipIfNeeded = true)
+        }
+      }
+    }.unsafeRunSync() shouldBe bodyText
+  }
+
+  it should "no-op client-side decompression on uncompressed data" in {
+    writeTestFile.use { blob =>
+      withClient { api =>
+        buildString {
+          api.readObject(blob.getBucket, blob.getName, gunzipIfNeeded = true)
         }
       }
     }.unsafeRunSync() shouldBe bodyText

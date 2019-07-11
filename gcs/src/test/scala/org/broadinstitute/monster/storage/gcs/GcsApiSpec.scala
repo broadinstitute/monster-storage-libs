@@ -43,6 +43,53 @@ class GcsApiSpec extends FlatSpec with Matchers {
       .unsafeRunSync() shouldBe bodyText
   }
 
+  it should "gunzip compressed data if told to" in {
+    val api = new GcsApi(auth, req => {
+      req.method shouldBe Method.GET
+      req.uri shouldBe getUri
+      req.headers.toList should contain theSameElementsAs List(
+        fakeAuth,
+        Header("Accept-Encoding", "identity, gzip"),
+        Header("Range", "bytes=0-")
+      )
+      Stream.emit {
+        Response[IO](
+          body = bodyStream.through(fs2.compress.gzip(GcsApi.GunzipBufferSize)),
+          headers = Headers.of(Header("Content-Encoding", "gzip"))
+        )
+      }
+    })
+
+    api
+      .readObject(bucket, path, gunzipIfNeeded = true)
+      .through(fs2.text.utf8Decode)
+      .compile
+      .toChunk
+      .map(_.toArray[String].mkString(""))
+      .unsafeRunSync() shouldBe bodyText
+  }
+
+  it should "not gunzip uncompressed data" in {
+    val api = new GcsApi(auth, req => {
+      req.method shouldBe Method.GET
+      req.uri shouldBe getUri
+      req.headers.toList should contain theSameElementsAs List(
+        fakeAuth,
+        Header("Accept-Encoding", "identity, gzip"),
+        Header("Range", "bytes=0-")
+      )
+      Stream.emit(Response[IO](body = bodyStream))
+    })
+
+    api
+      .readObject(bucket, path, gunzipIfNeeded = true)
+      .through(fs2.text.utf8Decode)
+      .compile
+      .toChunk
+      .map(_.toArray[String].mkString(""))
+      .unsafeRunSync() shouldBe bodyText
+  }
+
   it should "read objects starting at an offset" in {
     val start = 100L
     val api = new GcsApi(auth, req => {
