@@ -1,5 +1,4 @@
-// Settings to apply across the entire build.
-enablePlugins(GitVersioning)
+// Settings to apply across the entire build
 inThisBuild(
   Seq(
     organization := "org.broadinstitute",
@@ -81,10 +80,12 @@ val commonSettings = Seq(
 lazy val `monster-storage-libs` = project
   .in(file("."))
   .aggregate(gcs)
+  .settings(publish / skip := true)
 
 lazy val gcs = project
   .in(file("gcs"))
   .configs(IntegrationTest)
+  .enablePlugins(PublishPlugin)
   .settings(commonSettings)
   .settings(
     Defaults.itSettings,
