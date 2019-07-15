@@ -41,6 +41,7 @@ pipeline {
                 script {
                     def vaultPath = 'secret/dsp/accts/artifactory/dsdejenkins'
                     def parts = [
+                            'set +x',
                             'VAULT_TOKEN=$(cat $VAULT_TOKEN_PATH)',
                             "ARTIFACTORY_USERNAME=\$(vault read -field=username $vaultPath)",
                             "ARTIFACTORY_PASSWORD=\$(vault read -field=password $vaultPath)",
