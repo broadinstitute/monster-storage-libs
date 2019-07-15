@@ -12,12 +12,8 @@ object PublishPlugin extends AutoPlugin {
   // Make sure sbt-dynver is loaded before these settings.
   override def requires: Plugins = DynVerPlugin
 
-  /**
-    * Local name to associate with our Artifactory instance.
-    *
-    * Only used to link URLs with credentials within the build tool.
-    */
-  private val artifactoryName = "Broad Artifactory"
+  /** Realm reported by our Artifactory instance. */
+  private val artifactoryRealm = "Artifactory Realm"
 
   /** Hostname of our Artifactory instance. */
   private val artifactoryHost = "broadinstitute.jfrog.io"
@@ -39,7 +35,7 @@ object PublishPlugin extends AutoPlugin {
       username <- sys.env.get(artifactoryUsernameVar)
       password <- sys.env.get(artifactoryPasswordVar)
     } yield {
-      Credentials(artifactoryName, artifactoryHost, username, password)
+      Credentials(artifactoryRealm, artifactoryHost, username, password)
     }
 
     cred.orElse {
@@ -54,7 +50,7 @@ object PublishPlugin extends AutoPlugin {
   /** Maven-style resolver for our Artifactory instance. */
   private lazy val artifactoryResolver = Def.task {
     val target = if (isSnapshot.value) "snapshot" else "release"
-    artifactoryName at s"https://$artifactoryHost/broadinstitute/libs-$target-local"
+    artifactoryRealm at s"https://$artifactoryHost/broadinstitute/libs-$target-local"
   }
 
   // Settings to add to the entire build when this plugin is loaded on a project.
