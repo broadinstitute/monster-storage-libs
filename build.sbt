@@ -1,8 +1,7 @@
-// Settings to apply across the entire build.
-enablePlugins(GitVersioning)
+// Settings to apply across the entire build
 inThisBuild(
   Seq(
-    organization := "org.broadinstitute",
+    organization := "org.broadinstitute.monster",
     scalaVersion := "2.12.8",
     // Auto-format
     scalafmtConfig := (ThisBuild / baseDirectory)(_ / ".scalafmt.conf").value,
@@ -80,11 +79,13 @@ val commonSettings = Seq(
 
 lazy val `monster-storage-libs` = project
   .in(file("."))
-  .aggregate(gcs)
+  .aggregate(`gcs-lib`)
+  .settings(publish / skip := true)
 
-lazy val gcs = project
+lazy val `gcs-lib` = project
   .in(file("gcs"))
   .configs(IntegrationTest)
+  .enablePlugins(PublishPlugin)
   .settings(commonSettings)
   .settings(
     Defaults.itSettings,
