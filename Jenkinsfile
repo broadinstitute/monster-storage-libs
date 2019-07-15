@@ -36,7 +36,7 @@ pipeline {
             }
         }
         stage('Publish') {
-            //when { branch 'master' }
+            when { branch 'master' }
             steps {
                 script {
                     def vaultPath = 'secret/dsp/accts/artifactory/dsdejenkins'
