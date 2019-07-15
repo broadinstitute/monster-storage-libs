@@ -49,8 +49,6 @@ pipeline {
                     sh parts.join(' ')
                 }
             }
-
-            sh ''
         }
     }
     post {
