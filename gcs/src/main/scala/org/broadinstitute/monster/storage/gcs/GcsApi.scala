@@ -26,6 +26,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
   import GcsApi._
 
   private val parser = new JawnParser()
+
   /**
     * Read a range of bytes (potentially the whole file) from an object in cloud storage.
     *
@@ -100,11 +101,11 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     *
     * @param bucket name of the GCS bucket to check within
     * @param path the path within `bucket` to check
-    * @return a boolean indicating if an object exists at `path` in `bucket`, and an
-    *         optional md5 value for the object if it exists and is known to GCS
+    * @return a boolean indicating if an object exists at `path` in `bucket`, and the
+    *         md5 of the object if Google calculated one during the upload
     */
   def statObject(bucket: String, path: String): IO[(Boolean, Option[String])] = {
-    val gcsUri = baseGcsUri(bucket, path)
+    val gcsUri = baseGcsUri(bucket, path).copy(query = Query.fromPairs("alt" -> "json"))
     val gcsReq = Request[IO](method = Method.GET, uri = gcsUri)
 
     runHttp(gcsReq).use { response =>
@@ -118,7 +119,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
             .flatMap(_.as[JsonObject])
             .liftTo[IO]
         } yield {
-          (true, objectMetadata("md5Hash").flatMap(_.asString))
+          (true, objectMetadata(ObjectMd5Key).flatMap(_.asString))
         }
       } else {
         IO.raiseError(
@@ -145,7 +146,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     expectedMd5
       .fold(baseObjectMetadata) { hexMd5 =>
         baseObjectMetadata.add(
-          "md5Hash",
+          ObjectMd5Key,
           Base64.encodeBase64String(Hex.decodeHex(hexMd5.toCharArray)).asJson
         )
       }
@@ -212,7 +213,9 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
         if (response.status.isSuccess) {
           IO.unit
         } else {
-          IO.raiseError(new RuntimeException(s"Failed to upload bytes to $path in $bucket"))
+          IO.raiseError(
+            new RuntimeException(s"Failed to upload bytes to $path in $bucket")
+          )
         }
       }
     }
@@ -262,7 +265,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     runHttp(gcsReq).use { response =>
       response.headers
         .get(CaseInsensitiveString("X-GUploader-UploadID"))
-        .map{_.value}
+        .map { _.value }
         .liftTo[IO](new RuntimeException(s"no upload token for $path in $bucket"))
     }
   }
@@ -289,39 +292,41 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
   ): IO[Either[Long, Unit]] = {
     val chunks = chunkData.chunkN(bytesPerUploadRequest)
 
-    chunks.evalMap { chunk =>
-      val chunkSize = chunk.size
+    chunks.zipWithIndex.evalMap {
+      case (chunk, index) =>
+        val chunkSize = chunk.size
+        val chunkStart = bytesPerUploadRequest * index
 
-      val gcsReq =  Request[IO](
-        method = Method.PUT,
-        uri = baseGcsUploadUri(bucket, "resumable")
-          .withQueryParam("upload_id", uploadToken),
-        headers = Headers.of(
-          `Content-Length`.unsafeFromLong(chunkSize.toLong),
-          `Content-Range`(rangeStart, rangeStart + chunkSize - 1)
-        ),
-        body = chunkData
-      )
+        val gcsReq = Request[IO](
+          method = Method.PUT,
+          uri = baseGcsUploadUri(bucket, "resumable")
+            .withQueryParam("upload_id", uploadToken),
+          headers = Headers.of(
+            `Content-Length`.unsafeFromLong(chunkSize.toLong),
+            `Content-Range`(chunkStart, chunkStart + chunkSize - 1)
+          ),
+          body = Stream.chunk(chunk)
+        )
 
-      runHttp(gcsReq).use { response =>
-        if (response.status.code == 308) {
-          val bytesReceived = for {
-            range <- response.headers.get(`Content-Range`)
-            rangeEnd <- range.range.second
-          } yield {
-            rangeEnd
-          }
-          IO.pure(Left(bytesReceived.getOrElse(rangeStart + chunkSize)))
-        } else if (response.status.isSuccess) {
-          IO.pure(Right(()))
-        } else {
-          IO.raiseError(
-            new RuntimeException(
-              s"Failed to upload chunk with upload token: $uploadToken"
+        runHttp(gcsReq).use { response =>
+          if (response.status.code == 308) {
+            val bytesReceived = for {
+              range <- response.headers.get(`Content-Range`)
+              rangeEnd <- range.range.second
+            } yield {
+              rangeEnd
+            }
+            IO.pure(Left(bytesReceived.getOrElse(rangeStart + chunkSize)))
+          } else if (response.status.isSuccess) {
+            IO.pure(Right(()))
+          } else {
+            IO.raiseError(
+              new RuntimeException(
+                s"Failed to upload chunk with upload token: $uploadToken"
+              )
             )
-          )
+          }
         }
-      }
     }.compile.lastOrError
   }
 
@@ -386,16 +391,17 @@ object GcsApi {
     }
 
   /** Build the JSON API endpoint for an existing bucket/path in GCS. */
-  def baseGcsUri(bucket: String, path: String): Uri =
+  def baseGcsUri(bucket: String, path: String): Uri = {
     // NOTE: Calls to the `/` method cause the RHS to be URL-encoded.
     // This is the correct behavior in this case, but it can cause confusion.
     uri"https://www.googleapis.com/storage/v1/b/" / bucket / "o" / path
+  }
 
   /** Build the JSON API endpoint for an upload to a GCS bucket. */
-  def baseGcsUploadUri(bucket: String, uploadType: String): Uri =
-    Uri
-      .unsafeFromString(s"https://www.googleapis.com/upload/storage/v1/b/$bucket/o")
-      .withQueryParam("uploadType", uploadType)
+  def baseGcsUploadUri(bucket: String, uploadType: String): Uri = {
+    val uri = uri"https://www.googleapis.com/upload/storage/v1/b/" / bucket / "o"
+    uri.copy(query = Query.fromPairs("uploadType" -> uploadType))
+  }
 
   private val bytesPerKib = 1024
   private val bytesPerMib = 1024 * bytesPerKib
@@ -419,4 +425,7 @@ object GcsApi {
     * so it seems like a safe bet for a magic number.
     */
   val GunzipBufferSize: Int = 256 * bytesPerKib
+
+  /** TODO Description */
+  val ObjectMd5Key: String = "md5Hash"
 }
