@@ -26,6 +26,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
   import GcsApi._
 
   private val parser = new JawnParser()
+  private val applicationJsonContentType = `Content-Type`(MediaType.application.json, Charset.`UTF-8`)
 
   /**
     * Read a range of bytes (potentially the whole file) from an object in cloud storage.
@@ -90,6 +91,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
           val err =
             s"""Attempt to get object bytes returned ${response.status}:
                |$payload""".stripMargin
+          // reportError(response, s"Failed to get object bytes from $path in $bucket"")
           Stream.raiseError[IO](new Exception(err))
         }
       }
@@ -122,11 +124,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
           (true, objectMetadata(ObjectMd5Key).flatMap(_.asString))
         }
       } else {
-        IO.raiseError(
-          new RuntimeException(
-            s"Request for metadata from $gcsUri returned status ${response.status}"
-          )
-        )
+        reportError(response, s"Request for metadata from $gcsUri failed")
       }
     }
   }
@@ -180,7 +178,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
 
     val dataHeader =
       s"""--${multipartBoundary.value}
-         |${`Content-Type`(MediaType.application.json, Charset.`UTF-8`).renderString}
+         |${applicationJsonContentType.renderString}
          |
          |${objectMetadata.noSpaces}
          |
@@ -213,9 +211,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
         if (response.status.isSuccess) {
           IO.unit
         } else {
-          IO.raiseError(
-            new RuntimeException(s"Failed to upload bytes to $path in $bucket")
-          )
+            reportError(response, s"Failed to create object for $path in $bucket")
         }
       }
     }
@@ -254,24 +250,25 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
       body = Stream.emits(objectMetadata),
       headers = Headers.of(
         `Content-Length`.unsafeFromLong(objectMetadata.length.toLong),
-        `Content-Type`(MediaType.application.json, Charset.`UTF-8`),
-        Header("X-Upload-Content-Length", expectedSize.toString),
+        applicationJsonContentType,
+        Header(uploadContentLengthHeaderName, expectedSize.toString),
         contentType.toRaw.copy(
-          name = CaseInsensitiveString("X-Upload-Content-Type")
+          name = CaseInsensitiveString(uploadContentTypeHeaderName)
         )
       )
     )
 
     runHttp(gcsReq).use { response =>
       response.headers
-        .get(CaseInsensitiveString("X-GUploader-UploadID"))
+        .get(CaseInsensitiveString(uploaderIDHeaderName))
         .map { _.value }
-        .liftTo[IO](new RuntimeException(s"no upload token for $path in $bucket"))
+        // reportError(response, s"No upload token returned after initializing upload to $path in $bucket"")
+        .liftTo[IO](new RuntimeException(s"No upload token returned after initializing upload to $path in $bucket"))
     }
   }
 
   /**
-    * Upload a chunk of bytes to an ongoing GCS resumable upload.
+    * Upload bytes to an ongoing GCS resumable upload.
     *
     * @see https://cloud.google.com/storage/docs/json_api/v1/how-tos/resumable-upload#upload-resumable
     *
@@ -279,18 +276,18 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     * @param uploadToken the unique ID of the previously-initialized resumable upload
     * @param rangeStart the (zero-indexed) position of the first byte of `chunkData` within
     *                   the source file being uploaded
-    * @param chunkData chunk of bytes to upload
+    * @param data bytes to upload
     * @return either the number of bytes stored by GCS so far (signalling that the upload is not complete),
     *         or Unit when all bytes have been received and GCS signals the upload is done
     */
-  def uploadChunk(
+  def uploadBytes(
     bucket: String,
     uploadToken: String,
     rangeStart: Long,
-    chunkData: Stream[IO, Byte],
+    data: Stream[IO, Byte],
     bytesPerUploadRequest: Int = MaxBytesPerUploadRequest
   ): IO[Either[Long, Unit]] = {
-    val chunks = chunkData.chunkN(bytesPerUploadRequest)
+    val chunks = data.chunkN(bytesPerUploadRequest)
 
     chunks.zipWithIndex.evalMap {
       case (chunk, index) =>
@@ -320,11 +317,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
           } else if (response.status.isSuccess) {
             IO.pure(Right(()))
           } else {
-            IO.raiseError(
-              new RuntimeException(
-                s"Failed to upload chunk with upload token: $uploadToken"
-              )
-            )
+            reportError(response, s"Failed to upload bytes to $bucket")
           }
         }
     }.compile.lastOrError
@@ -346,9 +339,13 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
       if (response.status.isSuccess) {
         IO.unit
       } else {
-        IO.raiseError(new RuntimeException(s"Failed to delete object $path in $bucket"))
+        reportError(response, s"Failed to delete object $path in $bucket")
       }
     }
+  }
+
+  private def reportError(failedResponse: Response[IO], additionalErrorMessage: String): IO[Unit] = {
+    IO.raiseError(new RuntimeException(s"Failed response return ${failedResponse.status}\n$additionalErrorMessage"))
   }
 }
 
@@ -399,7 +396,7 @@ object GcsApi {
 
   /** Build the JSON API endpoint for an upload to a GCS bucket. */
   def baseGcsUploadUri(bucket: String, uploadType: String): Uri = {
-    val uri = uri"https://www.googleapis.com/upload/storage/v1/b/" / bucket / "o"
+    val uri = uri"https://www.googleapis.com/upload/storage/v1/b" / bucket / "o"
     uri.copy(query = Query.fromPairs("uploadType" -> uploadType))
   }
 
@@ -425,6 +422,11 @@ object GcsApi {
     * so it seems like a safe bet for a magic number.
     */
   val GunzipBufferSize: Int = 256 * bytesPerKib
+
+  val uploadContentLengthHeaderName = "X-Upload-Content-Length"
+  val uploadContentTypeHeaderName = "X-Upload-Content-Type"
+  val uploaderIDHeaderName = "X-GUploader-UploadID"
+
 
   /** TODO Description */
   val ObjectMd5Key: String = "md5Hash"

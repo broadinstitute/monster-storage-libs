@@ -339,7 +339,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
       .unsafeRunSync() shouldBe uploadToken
   }
 
-  // uploadChunk
+  // uploadBytes
   it should "upload bytes to a resumable upload for a single chunk" in {
     val api = new GcsApi(req => {
       val checks = req.body.compile.toChunk.map { chunk =>
@@ -362,7 +362,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
     })
 
     api
-      .uploadChunk(
+      .uploadBytes(
         bucket,
         uploadToken,
         0,
@@ -401,7 +401,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
     })
 
     api
-      .uploadChunk(
+      .uploadBytes(
         bucket,
         uploadToken,
         0,
