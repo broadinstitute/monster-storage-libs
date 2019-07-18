@@ -338,8 +338,14 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
 
 object GcsApi {
 
-
-  private def reportError[A] (failedResponse: Response[IO], additionalErrorMessage: String): IO[A] = {
+  /**
+    * Given a response to an HTTP request and any additional info, raise an error with the given
+    * responses status and message
+    *
+    * @param failedResponse the failed responses with a given status from an HTTP requests
+    * @param additionalErrorMessage Any extra information the should be added to the raised error
+    */
+  private def reportError[A] (failedResponse: Response[IO], additionalErrorMessage: String = ""): IO[A] = {
     failedResponse.body.compile.toChunk.flatMap { chunk =>
       val err =
         s"""$additionalErrorMessage
