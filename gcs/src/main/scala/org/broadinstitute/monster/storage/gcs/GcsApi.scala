@@ -85,15 +85,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
       } else if (response.status.isSuccess) {
         response.body
       } else {
-        val fullBody =
-          response.body.compile.toChunk.map(chunk => new String(chunk.toArray[Byte]))
-        Stream.eval(fullBody).flatMap { payload =>
-          val err =
-            s"""Attempt to get object bytes returned ${response.status}:
-               |$payload""".stripMargin
-          // reportError(response, s"Failed to get object bytes from $path in $bucket"")
-          Stream.raiseError[IO](new Exception(err))
-        }
+        Stream.eval(reportError(response, "Failed to get object bytes"))
       }
     }
   }
@@ -262,7 +254,6 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
       response.headers
         .get(CaseInsensitiveString(uploaderIDHeaderName))
         .map { _.value }
-        // reportError(response, s"No upload token returned after initializing upload to $path in $bucket"")
         .liftTo[IO](new RuntimeException(s"No upload token returned after initializing upload to $path in $bucket"))
     }
   }
@@ -274,7 +265,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     *
     * @param bucket the GCS bucket to upload the data into
     * @param uploadToken the unique ID of the previously-initialized resumable upload
-    * @param rangeStart the (zero-indexed) position of the first byte of `chunkData` within
+    * @param rangeStart the (zero-indexed) position of the first byte of `data` within
     *                   the source file being uploaded
     * @param data bytes to upload
     * @return either the number of bytes stored by GCS so far (signalling that the upload is not complete),
@@ -343,13 +334,20 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
       }
     }
   }
-
-  private def reportError(failedResponse: Response[IO], additionalErrorMessage: String): IO[Unit] = {
-    IO.raiseError(new RuntimeException(s"Failed response return ${failedResponse.status}\n$additionalErrorMessage"))
-  }
 }
 
 object GcsApi {
+
+
+  private def reportError[A] (failedResponse: Response[IO], additionalErrorMessage: String): IO[A] = {
+    failedResponse.body.compile.toChunk.flatMap { chunk =>
+      val err =
+        s"""$additionalErrorMessage
+           |Failed response returned ${failedResponse.status}:
+           |${new String(chunk.toArray[Byte])}""".stripMargin
+      IO.raiseError[A](new Exception(err))
+    }
+  }
 
   /**
     * Construct a client which will send authorized requests to GCS over HTTP.
