@@ -584,7 +584,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
           val recordedBytes = max * 9 / 10
           val done = recordedBytes <= min
           Response[IO](
-            status = if (done) Status.Ok else Status(308),
+            status = if (done) Status.Ok else ResumeIncompleteStatus,
             headers = Headers.of(Range(0, if (done) max else recordedBytes))
           )
       }
