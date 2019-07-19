@@ -314,8 +314,8 @@ class GcsApiSpec extends FlatSpec with Matchers {
           req.headers.toList should contain theSameElementsAs List(
             `Content-Length`.unsafeFromLong(bodyChunk.size.toLong),
             `Content-Type`(MediaType.application.json, Charset.`UTF-8`),
-            Header(GcsApi.uploadContentLengthHeaderName, bodyTextNumberOfBytes.toString),
-            Header(GcsApi.uploadContentTypeHeaderName, "text/event-stream")
+            Header(GcsApi.UploadContentLengthHeader, bodyTextNumberOfBytes.toString),
+            Header(GcsApi.UploadContentTypeHeader, "text/event-stream")
           )
       }
 
@@ -323,7 +323,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
         Response[IO](
           status = Status.Ok,
           headers = Headers.of(
-            Header(GcsApi.uploaderIDHeaderName, uploadToken)
+            Header(GcsApi.UploadIDHeader, uploadToken)
           )
         )
       }

@@ -244,16 +244,16 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
       headers = Headers.of(
         `Content-Length`.unsafeFromLong(objectMetadata.length.toLong),
         applicationJsonContentType,
-        Header(uploadContentLengthHeaderName, expectedSize.toString),
+        Header(UploadContentLengthHeader, expectedSize.toString),
         contentType.toRaw.copy(
-          name = CaseInsensitiveString(uploadContentTypeHeaderName)
+          name = CaseInsensitiveString(UploadContentTypeHeader)
         )
       )
     )
 
     runHttp(gcsReq).use { response =>
       response.headers
-        .get(CaseInsensitiveString(uploaderIDHeaderName))
+        .get(CaseInsensitiveString(UploadIDHeader))
         .map { _.value }
         .liftTo[IO](
           new RuntimeException(
@@ -327,11 +327,9 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
                 } else if (response.status.isSuccess) {
                   IO.pure(None)
                 } else {
-                  // TODO: Rewrite to use the new uniform error reporting method.
-                  IO.raiseError(
-                    new RuntimeException(
-                      s"Failed to upload chunk with upload token: $uploadToken"
-                    )
+                  reportError(
+                    response,
+                    s"Failed to upload chunk with upload token: $uploadToken"
                   )
                 }
               }
@@ -480,11 +478,31 @@ object GcsApi {
     */
   val GunzipBufferSize: Int = 256 * bytesPerKib
 
-  val uploadContentLengthHeaderName = "X-Upload-Content-Length"
-  val uploadContentTypeHeaderName = "X-Upload-Content-Type"
-  val uploaderIDHeaderName = "X-GUploader-UploadID"
+  /**
+    * Custom GCS header used when initializing a resumable upload to indicate the total
+    * number of bytes that will be pushed over the course of that upload.
+    */
+  val UploadContentLengthHeader = "X-Upload-Content-Length"
 
-  /** The key and metadata for the Md5 of a GCS object. Please see here (https://cloud.google.com/storage/docs/hashes-etags).*/
+  /**
+    * Custom GCS header used when initializing a resumable upload to set the expected
+    * content-type of the bytes pushed over the course of that upload.
+    */
+  val UploadContentTypeHeader = "X-Upload-Content-Type"
+
+  /**
+    * Custom GCS header sent in the response of successfully-initialized resumable uploads.
+    *
+    * The value of this header serves as the unique ID for the upload within its enclosing
+    * bucket, and must be included in subsequent upload requests.
+    */
+  val UploadIDHeader = "X-GUploader-UploadID"
+
+  /**
+    * Key used in GCS object metadata to report the md5 of the object's contents.
+    *
+    * @see https://cloud.google.com/storage/docs/hashes-etags
+    */
   val ObjectMd5Key: String = "md5Hash"
 
   /**
