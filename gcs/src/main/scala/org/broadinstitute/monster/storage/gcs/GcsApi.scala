@@ -5,7 +5,7 @@ import java.nio.file.Path
 import cats.data.NonEmptyList
 import cats.effect.{Clock, ContextShift, IO, Resource}
 import cats.implicits._
-import fs2.Stream
+import fs2.{Chunk, Pull, Stream}
 import io.circe.jawn.JawnParser
 import io.circe.syntax._
 import io.circe.{Json, JsonObject}
@@ -244,16 +244,16 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
       headers = Headers.of(
         `Content-Length`.unsafeFromLong(objectMetadata.length.toLong),
         applicationJsonContentType,
-        Header(uploadContentLengthHeaderName, expectedSize.toString),
+        Header(UploadContentLengthHeader, expectedSize.toString),
         contentType.toRaw.copy(
-          name = CaseInsensitiveString(uploadContentTypeHeaderName)
+          name = CaseInsensitiveString(UploadContentTypeHeader)
         )
       )
     )
 
     runHttp(gcsReq).use { response =>
       response.headers
-        .get(CaseInsensitiveString(uploaderIDHeaderName))
+        .get(CaseInsensitiveString(UploadIDHeader))
         .map { _.value }
         .liftTo[IO](
           new RuntimeException(
@@ -283,40 +283,76 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     data: Stream[IO, Byte],
     bytesPerUploadRequest: Int = MaxBytesPerUploadRequest
   ): IO[Either[Long, Unit]] = {
-    val chunks = data.chunkN(bytesPerUploadRequest)
 
-    chunks.zipWithIndex.evalMap {
-      case (chunk, index) =>
-        val chunkSize = chunk.size
-        val chunkStart = bytesPerUploadRequest * index
+    // Helper method to incrementally push data from the input stream to GCS.
+    def pushChunks(start: Long, data: Stream[IO, Byte]): Pull[IO, Nothing, Option[Long]] =
+      // Pull the first chunk of data off the front of the stream.
+      data.pull
+        .unconsN(bytesPerUploadRequest, allowFewer = true)
+        .flatMap {
+          // If the stream was empty, mark that we haven't made any progress
+          // from the initial byte.
+          case None => Pull.pure(Some(start))
 
-        val gcsReq = Request[IO](
-          method = Method.PUT,
-          uri = baseGcsUploadUri(bucket, "resumable")
-            .withQueryParam("upload_id", uploadToken),
-          headers = Headers.of(
-            `Content-Length`.unsafeFromLong(chunkSize.toLong),
-            `Content-Range`(chunkStart, chunkStart + chunkSize - 1)
-          ),
-          body = Stream.chunk(chunk)
-        )
+          // If a chunk of data was pulled, upload it to GCS.
+          case Some((chunk, remaining)) =>
+            val chunkSize = chunk.size
+            val chunkEnd = start + chunkSize - 1
 
-        runHttp(gcsReq).use { response =>
-          if (response.status.code == 308) {
-            val bytesReceived = for {
-              range <- response.headers.get(`Content-Range`)
-              rangeEnd <- range.range.second
-            } yield {
-              rangeEnd
+            val gcsReq = Request[IO](
+              method = Method.PUT,
+              uri = baseGcsUploadUri(bucket, "resumable")
+                .withQueryParam("upload_id", uploadToken),
+              headers = Headers.of(
+                `Content-Length`.unsafeFromLong(chunkSize.toLong),
+                `Content-Range`(start, chunkEnd)
+              ),
+              body = Stream.chunk(chunk)
+            )
+
+            Pull.eval {
+              runHttp(gcsReq).use { response =>
+                // GCS uses a redirect code to signal that more bytes should be uploaded.
+                if (response.status == ResumeIncompleteStatus) {
+                  val bytesReceived = for {
+                    range <- response.headers.get(Range)
+                    rangeEnd <- range.ranges.head.second
+                  } yield {
+                    rangeEnd
+                  }
+                  // If Google doesn't report a range, the safest thing to do is retry.
+                  // Otherwise convert the returned inclusive endpoint to an exclusive
+                  // endpoint by adding 1.
+                  IO.pure(Some(bytesReceived.fold(start)(_ + 1)))
+                } else if (response.status.isSuccess) {
+                  IO.pure(None)
+                } else {
+                  reportError(
+                    response,
+                    s"Failed to upload chunk with upload token: $uploadToken"
+                  )
+                }
+              }
+            }.flatMap {
+              // If there are more bytes to upload, try again recursively.
+              case Some(nextByte) =>
+                val numBytesUploadedFromChunk = nextByte - start
+                pushChunks(
+                  nextByte,
+                  // Make sure we don't double-upload bytes that GCS did
+                  // manage to store.
+                  Stream.chunk(chunk).drop(numBytesUploadedFromChunk).append(remaining)
+                )
+              case None => Pull.pure(None)
             }
-            IO.pure(Left(bytesReceived.getOrElse(rangeStart + chunkSize)))
-          } else if (response.status.isSuccess) {
-            IO.pure(Right(()))
-          } else {
-            reportError(response, s"Failed to upload bytes to $bucket")
-          }
         }
-    }.compile.lastOrError
+
+    pushChunks(rangeStart, data)
+      .flatMap(result => Pull.output(Chunk(result)))
+      .stream
+      .compile
+      .lastOrError
+      .map(_.toLeft(()))
   }
 
   /**
@@ -343,9 +379,16 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
 
 object GcsApi {
 
+  /** Exception raised when GCS returns an error status. */
+  case class GcsFailure(status: Status, body: String, message: String)
+      extends Exception(
+        s"""$message
+           |Failed response returned $status:
+           |$body""".stripMargin
+      )
+
   /**
-    * Given a response to an HTTP request and any additional info, raise an error with the given
-    * responses status and message
+    * Convert a failed HTTP response into an error capturing info needed for debugging / retries.
     *
     * @param failedResponse the failed responses with a given status from an HTTP requests
     * @param additionalErrorMessage Any extra information the should be added to the raised error
@@ -353,15 +396,15 @@ object GcsApi {
   private def reportError[A](
     failedResponse: Response[IO],
     additionalErrorMessage: String
-  ): IO[A] = {
+  ): IO[A] =
     failedResponse.body.compile.toChunk.flatMap { chunk =>
-      val err =
-        s"""$additionalErrorMessage
-           |Failed response returned ${failedResponse.status}:
-           |${new String(chunk.toArray[Byte])}""".stripMargin
-      IO.raiseError[A](new Exception(err))
+      val error = GcsFailure(
+        failedResponse.status,
+        new String(chunk.toArray[Byte]),
+        additionalErrorMessage
+      )
+      IO.raiseError(error)
     }
-  }
 
   /**
     * Construct a client which will send authorized requests to GCS over HTTP.
@@ -435,10 +478,36 @@ object GcsApi {
     */
   val GunzipBufferSize: Int = 256 * bytesPerKib
 
-  val uploadContentLengthHeaderName = "X-Upload-Content-Length"
-  val uploadContentTypeHeaderName = "X-Upload-Content-Type"
-  val uploaderIDHeaderName = "X-GUploader-UploadID"
+  /**
+    * Custom GCS header used when initializing a resumable upload to indicate the total
+    * number of bytes that will be pushed over the course of that upload.
+    */
+  val UploadContentLengthHeader = "X-Upload-Content-Length"
 
-  /** The key and metadata for the Md5 of a GCS object. Please see here (https://cloud.google.com/storage/docs/hashes-etags).*/
+  /**
+    * Custom GCS header used when initializing a resumable upload to set the expected
+    * content-type of the bytes pushed over the course of that upload.
+    */
+  val UploadContentTypeHeader = "X-Upload-Content-Type"
+
+  /**
+    * Custom GCS header sent in the response of successfully-initialized resumable uploads.
+    *
+    * The value of this header serves as the unique ID for the upload within its enclosing
+    * bucket, and must be included in subsequent upload requests.
+    */
+  val UploadIDHeader = "X-GUploader-UploadID"
+
+  /**
+    * Key used in GCS object metadata to report the md5 of the object's contents.
+    *
+    * @see https://cloud.google.com/storage/docs/hashes-etags
+    */
   val ObjectMd5Key: String = "md5Hash"
+
+  /**
+    * Status code returned by GCS when a request to upload bytes to a resumable
+    * upload succeeds, but the server still expects more bytes.
+    */
+  val ResumeIncompleteStatus = Status(308, "Resume Incomplete")
 }
