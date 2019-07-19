@@ -37,7 +37,7 @@ inThisBuild(
 )
 
 // Compiler plugins.
-val betterMonadicForVersion = "0.3.0"
+val betterMonadicForVersion = "0.3.1"
 
 // Data types & control flow.
 val catsVersion = "1.6.0"
@@ -56,7 +56,7 @@ val googleAuthVersion = "0.16.2"
 val http4sVersion = "0.20.6"
 
 // Testing.
-val googleCloudJavaVersion = "1.82.0"
+val googleCloudJavaVersion = "1.83.0"
 val scalaMockVersion = "4.2.0"
 val scalaTestVersion = "3.0.8"
 val vaultDriverVersion = "4.1.0"
