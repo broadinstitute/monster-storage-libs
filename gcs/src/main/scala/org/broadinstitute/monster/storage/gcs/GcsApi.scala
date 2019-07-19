@@ -5,7 +5,7 @@ import java.nio.file.Path
 import cats.data.NonEmptyList
 import cats.effect.{Clock, ContextShift, IO, Resource}
 import cats.implicits._
-import fs2.Stream
+import fs2.{Chunk, Pull, Stream}
 import io.circe.jawn.JawnParser
 import io.circe.syntax._
 import io.circe.{Json, JsonObject}
@@ -283,40 +283,80 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     data: Stream[IO, Byte],
     bytesPerUploadRequest: Int = MaxBytesPerUploadRequest
   ): IO[Either[Long, Unit]] = {
-    val chunks = data.chunkN(bytesPerUploadRequest)
 
-    chunks.zipWithIndex.evalMap {
-      case (chunk, index) =>
-        val chunkSize = chunk.size
-        val chunkStart = bytesPerUploadRequest * index
+    // Helper method to incrementally push data from the input stream to GCS.
+    def pushChunks(
+      start: Long,
+      data: Stream[IO, Byte]
+    ): Pull[IO, Nothing, Either[Long, Unit]] =
+      // Pull the first chunk of data off the front of the stream.
+      data.pull
+        .unconsN(bytesPerUploadRequest, allowFewer = true)
+        .flatMap {
+          // If the stream was empty, mark that we haven't made any progress
+          // from the initial byte.
+          case None => Pull.pure(Left(start))
 
-        val gcsReq = Request[IO](
-          method = Method.PUT,
-          uri = baseGcsUploadUri(bucket, "resumable")
-            .withQueryParam("upload_id", uploadToken),
-          headers = Headers.of(
-            `Content-Length`.unsafeFromLong(chunkSize.toLong),
-            `Content-Range`(chunkStart, chunkStart + chunkSize - 1)
-          ),
-          body = Stream.chunk(chunk)
-        )
+          // If a chunk of data was pulled, upload it to GCS.
+          case Some((chunk, remaining)) =>
+            val chunkSize = chunk.size
+            val chunkEnd = start + chunkSize - 1
 
-        runHttp(gcsReq).use { response =>
-          if (response.status.code == 308) {
-            val bytesReceived = for {
-              range <- response.headers.get(`Content-Range`)
-              rangeEnd <- range.range.second
-            } yield {
-              rangeEnd
+            val gcsReq = Request[IO](
+              method = Method.PUT,
+              uri = baseGcsUploadUri(bucket, "resumable")
+                .withQueryParam("upload_id", uploadToken),
+              headers = Headers.of(
+                `Content-Length`.unsafeFromLong(chunkSize.toLong),
+                `Content-Range`(start, chunkEnd)
+              ),
+              body = Stream.chunk(chunk)
+            )
+
+            Pull.eval {
+              runHttp(gcsReq).use { response =>
+                // GCS uses a redirect code to signal that more bytes should be uploaded.
+                if (response.status.code == 308) {
+                  val bytesReceived = for {
+                    range <- response.headers.get(Range)
+                    rangeEnd <- range.ranges.head.second
+                  } yield {
+                    rangeEnd
+                  }
+                  // If Google doesn't report a range, the safest thing to do is retry.
+                  // Otherwise convert the returned inclusive endpoint to an exclusive
+                  // endpoint by adding 1.
+                  IO.pure(Left(bytesReceived.fold(start)(_ + 1)))
+                } else if (response.status.isSuccess) {
+                  IO.pure(Right(()))
+                } else {
+                  // TODO: Rewrite to use the new uniform error reporting method.
+                  IO.raiseError(
+                    new RuntimeException(
+                      s"Failed to upload chunk with upload token: $uploadToken"
+                    )
+                  )
+                }
+              }
+            }.flatMap {
+              // If there are more bytes to upload, try again recursively.
+              case Left(nextByte) =>
+                val numUploaded = nextByte - start
+                pushChunks(
+                  nextByte,
+                  // Make sure we don't double-upload bytes that GCS did
+                  // manage to store.
+                  Stream.chunk(chunk).drop(numUploaded).append(remaining)
+                )
+              case Right(_) => Pull.pure(Right(()))
             }
-            IO.pure(Left(bytesReceived.getOrElse(rangeStart + chunkSize)))
-          } else if (response.status.isSuccess) {
-            IO.pure(Right(()))
-          } else {
-            reportError(response, s"Failed to upload bytes to $bucket")
-          }
         }
-    }.compile.lastOrError
+
+    pushChunks(rangeStart, data)
+      .flatMap(result => Pull.output(Chunk(result)))
+      .stream
+      .compile
+      .lastOrError
   }
 
   /**
