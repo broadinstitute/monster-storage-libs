@@ -26,7 +26,8 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
   import GcsApi._
 
   private val parser = new JawnParser()
-  private val applicationJsonContentType = `Content-Type`(MediaType.application.json, Charset.`UTF-8`)
+  private val applicationJsonContentType =
+    `Content-Type`(MediaType.application.json, Charset.`UTF-8`)
 
   /**
     * Read a range of bytes (potentially the whole file) from an object in cloud storage.
@@ -203,7 +204,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
         if (response.status.isSuccess) {
           IO.unit
         } else {
-            reportError(response, s"Failed to create object for $path in $bucket")
+          reportError(response, s"Failed to create object for $path in $bucket")
         }
       }
     }
@@ -254,7 +255,11 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
       response.headers
         .get(CaseInsensitiveString(uploaderIDHeaderName))
         .map { _.value }
-        .liftTo[IO](new RuntimeException(s"No upload token returned after initializing upload to $path in $bucket"))
+        .liftTo[IO](
+          new RuntimeException(
+            s"No upload token returned after initializing upload to $path in $bucket"
+          )
+        )
     }
   }
 
@@ -345,7 +350,10 @@ object GcsApi {
     * @param failedResponse the failed responses with a given status from an HTTP requests
     * @param additionalErrorMessage Any extra information the should be added to the raised error
     */
-  private def reportError[A] (failedResponse: Response[IO], additionalErrorMessage: String = ""): IO[A] = {
+  private def reportError[A](
+    failedResponse: Response[IO],
+    additionalErrorMessage: String
+  ): IO[A] = {
     failedResponse.body.compile.toChunk.flatMap { chunk =>
       val err =
         s"""$additionalErrorMessage
@@ -431,7 +439,6 @@ object GcsApi {
   val uploadContentTypeHeaderName = "X-Upload-Content-Type"
   val uploaderIDHeaderName = "X-GUploader-UploadID"
 
-
-  /** TODO Description */
+  /** The key and metadata for the Md5 of a GCS object. Please see here (https://cloud.google.com/storage/docs/hashes-etags).*/
   val ObjectMd5Key: String = "md5Hash"
 }
