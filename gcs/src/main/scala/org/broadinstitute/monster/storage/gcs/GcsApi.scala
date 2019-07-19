@@ -285,17 +285,14 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
   ): IO[Either[Long, Unit]] = {
 
     // Helper method to incrementally push data from the input stream to GCS.
-    def pushChunks(
-      start: Long,
-      data: Stream[IO, Byte]
-    ): Pull[IO, Nothing, Either[Long, Unit]] =
+    def pushChunks(start: Long, data: Stream[IO, Byte]): Pull[IO, Nothing, Option[Long]] =
       // Pull the first chunk of data off the front of the stream.
       data.pull
         .unconsN(bytesPerUploadRequest, allowFewer = true)
         .flatMap {
           // If the stream was empty, mark that we haven't made any progress
           // from the initial byte.
-          case None => Pull.pure(Left(start))
+          case None => Pull.pure(Some(start))
 
           // If a chunk of data was pulled, upload it to GCS.
           case Some((chunk, remaining)) =>
@@ -316,7 +313,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
             Pull.eval {
               runHttp(gcsReq).use { response =>
                 // GCS uses a redirect code to signal that more bytes should be uploaded.
-                if (response.status.code == 308) {
+                if (response.status == ResumeIncompleteStatus) {
                   val bytesReceived = for {
                     range <- response.headers.get(Range)
                     rangeEnd <- range.ranges.head.second
@@ -326,9 +323,9 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
                   // If Google doesn't report a range, the safest thing to do is retry.
                   // Otherwise convert the returned inclusive endpoint to an exclusive
                   // endpoint by adding 1.
-                  IO.pure(Left(bytesReceived.fold(start)(_ + 1)))
+                  IO.pure(Some(bytesReceived.fold(start)(_ + 1)))
                 } else if (response.status.isSuccess) {
-                  IO.pure(Right(()))
+                  IO.pure(None)
                 } else {
                   // TODO: Rewrite to use the new uniform error reporting method.
                   IO.raiseError(
@@ -340,15 +337,15 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
               }
             }.flatMap {
               // If there are more bytes to upload, try again recursively.
-              case Left(nextByte) =>
-                val numUploaded = nextByte - start
+              case Some(nextByte) =>
+                val numBytesUploadedFromChunk = nextByte - start
                 pushChunks(
                   nextByte,
                   // Make sure we don't double-upload bytes that GCS did
                   // manage to store.
-                  Stream.chunk(chunk).drop(numUploaded).append(remaining)
+                  Stream.chunk(chunk).drop(numBytesUploadedFromChunk).append(remaining)
                 )
-              case Right(_) => Pull.pure(Right(()))
+              case None => Pull.pure(None)
             }
         }
 
@@ -357,6 +354,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
       .stream
       .compile
       .lastOrError
+      .map(_.toLeft(()))
   }
 
   /**
@@ -481,4 +479,10 @@ object GcsApi {
 
   /** The key and metadata for the Md5 of a GCS object. Please see here (https://cloud.google.com/storage/docs/hashes-etags).*/
   val ObjectMd5Key: String = "md5Hash"
+
+  /**
+    * Status code returned by GCS when a request to upload bytes to a resumable
+    * upload succeeds, but the server still expects more bytes.
+    */
+  val ResumeIncompleteStatus = Status(308, "Resume Incomplete")
 }
