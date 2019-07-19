@@ -381,9 +381,16 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
 
 object GcsApi {
 
+  /** Exception raised when GCS returns an error status. */
+  case class GcsFailure(status: Status, body: String, message: String)
+      extends Exception(
+        s"""$message
+           |Failed response returned $status:
+           |$body""".stripMargin
+      )
+
   /**
-    * Given a response to an HTTP request and any additional info, raise an error with the given
-    * responses status and message
+    * Convert a failed HTTP response into an error capturing info needed for debugging / retries.
     *
     * @param failedResponse the failed responses with a given status from an HTTP requests
     * @param additionalErrorMessage Any extra information the should be added to the raised error
@@ -391,15 +398,15 @@ object GcsApi {
   private def reportError[A](
     failedResponse: Response[IO],
     additionalErrorMessage: String
-  ): IO[A] = {
+  ): IO[A] =
     failedResponse.body.compile.toChunk.flatMap { chunk =>
-      val err =
-        s"""$additionalErrorMessage
-           |Failed response returned ${failedResponse.status}:
-           |${new String(chunk.toArray[Byte])}""".stripMargin
-      IO.raiseError[A](new Exception(err))
+      val error = GcsFailure(
+        failedResponse.status,
+        new String(chunk.toArray[Byte]),
+        additionalErrorMessage
+      )
+      IO.raiseError(error)
     }
-  }
 
   /**
     * Construct a client which will send authorized requests to GCS over HTTP.
