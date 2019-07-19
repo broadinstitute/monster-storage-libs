@@ -4,8 +4,8 @@ import cats.effect.{IO, Resource}
 import fs2.Stream
 import org.apache.commons.codec.digest.DigestUtils
 import org.http4s._
+import org.http4s.headers._
 import org.http4s.implicits._
-import org.http4s.headers.`Content-Type`
 import org.scalatest.{FlatSpec, Matchers}
 
 import scala.collection.mutable.ArrayBuffer
@@ -36,11 +36,6 @@ class GcsApiSpec extends FlatSpec with Matchers {
   private val createObjectURI = GcsApi.baseGcsUploadUri(bucket, "multipart")
 
   private val acceptEncodingHeader = Header("Accept-Encoding", "identity, gzip")
-  private val rangeHeaderName = "Range"
-  private val contentLengthHeaderName = "Content-Length"
-  private val contentRangeHeaderName = "Content-Length"
-  private val contentTypeHeaderName = "Content-Length"
-
 
   behavior of "GcsApi"
 
@@ -71,7 +66,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
       req.uri shouldBe readObjectURI
       req.headers.toList should contain theSameElementsAs List(
         acceptEncodingHeader,
-        Header(rangeHeaderName, "bytes=0-")
+        Header("Range", "bytes=0-")
       )
       Resource.pure {
         Response[IO](
@@ -96,7 +91,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
       req.uri shouldBe readObjectURI
       req.headers.toList should contain theSameElementsAs List(
         acceptEncodingHeader,
-        Header(rangeHeaderName, "bytes=0-")
+        Header("Range", "bytes=0-")
       )
       Resource.pure(Response[IO](body = bodyStream))
     })
@@ -117,7 +112,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
       req.uri shouldBe readObjectURI
       req.headers.toList should contain theSameElementsAs List(
         acceptEncodingHeader,
-        Header(rangeHeaderName, s"bytes=$start-")
+        Header("Range", s"bytes=$start-")
       )
       Resource.pure(Response[IO](body = bodyStream))
     })
@@ -138,7 +133,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
       req.uri shouldBe readObjectURI
       req.headers.toList should contain theSameElementsAs List(
         acceptEncodingHeader,
-        Header(rangeHeaderName, s"bytes=0-${end - 1}")
+        Header("Range", s"bytes=0-${end - 1}")
       )
       Resource.pure(Response[IO](body = bodyStream))
     })
@@ -160,7 +155,7 @@ class GcsApiSpec extends FlatSpec with Matchers {
       req.uri shouldBe readObjectURI
       req.headers.toList should contain theSameElementsAs List(
         acceptEncodingHeader,
-        Header(rangeHeaderName, s"bytes=$start-${end - 1}")
+        Header("Range", s"bytes=$start-${end - 1}")
       )
       Resource.pure(Response[IO](body = bodyStream))
     })
@@ -318,8 +313,8 @@ class GcsApiSpec extends FlatSpec with Matchers {
           req.method shouldBe Method.POST
           req.uri shouldBe initResumableUploadURI
           req.headers.toList should contain theSameElementsAs List(
-            Header(contentLengthHeaderName, bodyChunk.size.toString),
-            Header(contentTypeHeaderName, "application/json; charset=UTF-8"),
+            `Content-Length`.unsafeFromLong(bodyChunk.size.toLong),
+            `Content-Type`(MediaType.application.json, Charset.`UTF-8`),
             Header(GcsApi.uploadContentLengthHeaderName, bodyTextNumberOfBytes.toString),
             Header(GcsApi.uploadContentTypeHeaderName, "text/event-stream")
           )
@@ -349,12 +344,14 @@ class GcsApiSpec extends FlatSpec with Matchers {
   // uploadBytes
   it should "upload bytes to a resumable upload for a single chunk" in {
     val api = new GcsApi(req => {
+      val contentRangeStart = 0
+      val contentRangeEnd = bodyTextNumberOfBytes - 1
       val checks = req.body.compile.toChunk.map { chunk =>
         req.method shouldBe Method.PUT
         req.uri shouldBe uploadURI
         req.headers.toList should contain theSameElementsAs List(
-          Header(contentLengthHeaderName, chunk.size.toString),
-          Header(contentRangeHeaderName, s"bytes 0-${bodyTextNumberOfBytes - 1}/*")
+          `Content-Length`.unsafeFromLong(chunk.size.toLong),
+          `Content-Range`(contentRangeStart.toLong, contentRangeEnd.toLong)
         )
       }
 
@@ -389,11 +386,11 @@ class GcsApiSpec extends FlatSpec with Matchers {
         req.method shouldBe Method.PUT
         req.uri shouldBe uploadURI
         req.headers.toList should contain allElementsOf List(
-          Header(contentRangeHeaderName, chunk.size.toString())
+          `Content-Length`.unsafeFromLong(chunk.size.toLong)
         )
       }
 
-      req.headers.get(contentRangeHeaderName.ci) foreach { header =>
+      req.headers.get("Content-Range".ci) foreach { header =>
         ranges += header.value
       }
 
