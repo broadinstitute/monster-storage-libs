@@ -356,20 +356,19 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
   }
 
   /**
-    * Delete an object in GCS.
-    *
-    * TODO: Make this succeed if the object is already deleted, if possible.
+    * Delete an object in GCS if exists.
     *
     * @param bucket name of the bucket containing the object to delete
     * @param path path within `bucket` pointing to the object to delete
+    * @return true if an object was actually deleted, otherwise false
     */
-  def deleteObject(bucket: String, path: String): IO[Unit] = {
+  def deleteObject(bucket: String, path: String): IO[Boolean] = {
     val gcsUri = baseGcsUri(bucket, path)
     val gcsReq = Request[IO](method = Method.DELETE, uri = gcsUri)
 
     runHttp(gcsReq).use { response =>
-      if (response.status.isSuccess) {
-        IO.unit
+      if (response.status.isSuccess || response.status == Status.NotFound) {
+        IO.pure(response.status.isSuccess)
       } else {
         reportError(response, s"Failed to delete object $path in $bucket")
       }

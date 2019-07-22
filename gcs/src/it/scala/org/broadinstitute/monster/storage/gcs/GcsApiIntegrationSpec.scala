@@ -9,8 +9,11 @@ import com.bettercloud.vault.{Vault, VaultConfig}
 import com.google.auth.oauth2.ServiceAccountCredentials
 import com.google.cloud.storage.{BlobId, BlobInfo, StorageOptions}
 import fs2.Stream
+import org.apache.commons.codec.digest.DigestUtils
+import org.http4s.{MediaType, Status}
 import org.http4s.client.blaze.BlazeClientBuilder
 import org.http4s.client.middleware.Logger
+import org.http4s.headers._
 import org.scalatest.{BeforeAndAfterAll, EitherValues, FlatSpec, Matchers}
 
 import scala.concurrent.ExecutionContext
@@ -38,6 +41,8 @@ class GcsApiIntegrationSpec
        |pariatur. Excepteur sint occaecat cupidatat non proident, sunt in culpa qui officia
        |deserunt mollit anim id est laborum.
        |""".stripMargin
+
+  private val bodyMd5 = DigestUtils.md5Hex(bodyText)
 
   private val writerJson = {
     val tokenPath = sys.env
@@ -265,5 +270,84 @@ class GcsApiIntegrationSpec
       .unsafeRunSync()
 
     err.left.value.getMessage should include("404")
+  }
+
+  private def gcsExists(blob: BlobId): Boolean =
+    Option(gcsClient.get(blob)).exists(_.exists())
+
+  it should "delete a GCS object and return true upon success" in {
+    val wasDeleted = writeGzippedTestFile.use { blob =>
+      withClient { api =>
+        api.deleteObject(blob.getBucket, blob.getName).map { reportedDelete =>
+          !gcsExists(blob) && reportedDelete
+        }
+      }
+    }
+
+    wasDeleted.unsafeRunSync() shouldBe true
+  }
+
+  it should "return false if deleting a GCS object that doesn't exist" in {
+    val wasDeleted = withClient(_.deleteObject(bucket, "foobar"))
+    wasDeleted.unsafeRunSync() shouldBe false
+  }
+
+  private val textPlain = `Content-Type`(MediaType.text.`plain`)
+
+  it should "create an object in GCS in one upload with no expected md5" in {
+    val path = s"test/${OffsetDateTime.now()}/foobar"
+
+    val wasCreated = withClient { api =>
+      api
+        .createObject(bucket, path, textPlain, None, Stream.emits(bodyText.getBytes))
+        .bracket(_ => IO.delay(gcsExists(BlobId.of(bucket, path)))) { _ =>
+          IO.delay(gcsClient.delete(bucket, path)).as(())
+        }
+    }
+
+    wasCreated.unsafeRunSync() shouldBe true
+  }
+
+  it should "create an object in GCS in one upload with a correct expected md5" in {
+    val path = s"test/${OffsetDateTime.now()}/foobar"
+
+    val wasCreated = withClient { api =>
+      api
+        .createObject(
+          bucket,
+          path,
+          textPlain,
+          Some(bodyMd5),
+          Stream.emits(bodyText.getBytes)
+        )
+        .bracket(_ => IO.delay(gcsExists(BlobId.of(bucket, path)))) { _ =>
+          IO.delay(gcsClient.delete(bucket, path)).as(())
+        }
+    }
+
+    wasCreated.unsafeRunSync() shouldBe true
+  }
+
+  it should "fail to create an object in GCS in one upload with an incorrect md5" in {
+    val path = s"test/${OffsetDateTime.now()}/foobar"
+
+    val tryCreate = withClient { api =>
+      api.createObject(
+        bucket,
+        path,
+        textPlain,
+        Some("abcdef1234567890"),
+        Stream.emits(bodyText.getBytes)
+      )
+    }
+
+    tryCreate.recover {
+      case GcsApi.GcsFailure(status, body, _) =>
+        status shouldBe Status.BadRequest
+        body should include("md5")
+        ()
+    }.unsafeRunSync()
+
+    gcsExists(BlobId.of(bucket, path)) shouldBe false
   }
 }
