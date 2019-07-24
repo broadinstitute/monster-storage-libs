@@ -339,7 +339,7 @@ class GcsApiIntegrationSpec
         bucket,
         path,
         textPlain,
-        Some("abcdef1234567890"),
+        Some(DigestUtils.md5Hex("abcdef1234567890")),
         Stream.emits(bodyText.getBytes)
       )
     }
@@ -347,7 +347,7 @@ class GcsApiIntegrationSpec
     tryCreate.recover {
       case GcsApi.GcsFailure(status, body, _) =>
         status shouldBe Status.BadRequest
-        body should include("md5")
+        body should include("MD5")
         ()
     }.unsafeRunSync()
 

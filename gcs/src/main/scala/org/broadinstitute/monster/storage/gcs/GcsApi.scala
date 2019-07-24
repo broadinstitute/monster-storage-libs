@@ -177,6 +177,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
          |
          |--${multipartBoundary.value}
          |${contentType.renderString}
+         |
          |""".stripMargin.getBytes
 
     val dataFooter =
