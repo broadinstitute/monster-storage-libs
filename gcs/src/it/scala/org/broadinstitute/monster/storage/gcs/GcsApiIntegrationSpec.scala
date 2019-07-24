@@ -272,6 +272,7 @@ class GcsApiIntegrationSpec
     err.left.value.getMessage should include("404")
   }
 
+  // deleteObject
   private def gcsExists(blob: BlobId): Boolean =
     Option(gcsClient.get(blob)).exists(_.exists())
 
@@ -287,11 +288,13 @@ class GcsApiIntegrationSpec
     wasDeleted.unsafeRunSync() shouldBe true
   }
 
+
   it should "return false if deleting a GCS object that doesn't exist" in {
     val wasDeleted = withClient(_.deleteObject(bucket, "foobar"))
     wasDeleted.unsafeRunSync() shouldBe false
   }
 
+  // createObject
   private val textPlain = `Content-Type`(MediaType.text.`plain`)
 
   it should "create an object in GCS in one upload with no expected md5" in {
@@ -350,4 +353,53 @@ class GcsApiIntegrationSpec
 
     gcsExists(BlobId.of(bucket, path)) shouldBe false
   }
+
+  it should "should check if a GCS object exists and return true with a Md5 " in {
+    val objectExists = writeGzippedTestFile.use { blob =>
+      withClient { api =>
+        api.statObject(blob.getBucket, blob.getName).map { case(reportsObjectExists, reportedMd5) =>
+          gcsExists(blob) && reportsObjectExists && reportedMd5.get == gcsClient.get(blob).getMd5
+        }
+      }
+    }
+
+    objectExists.unsafeRunSync() shouldBe true
+  }
+
+  it should "should check if a GCS object exists and return false" in {
+    val path = s"test/${OffsetDateTime.now()}/foobar"
+
+
+    val objectExists = writeGzippedTestFile.use { blob =>
+      withClient { api =>
+        api.statObject(blob.getBucket, path).map { case(reportsObjectExists, reportedMd5) =>
+          !(gcsExists(blob) && reportsObjectExists) && reportedMd5.isEmpty
+        }
+      }
+    }
+
+    objectExists.unsafeRunSync() shouldBe true
+  }
+
+  // initResumableUpload
+  it should "initialize a resumable upload" in {
+    val path = s"test/${OffsetDateTime.now()}/foobar"
+
+    val uploadInitialized = writeGzippedTestFile.use { blob =>
+      withClient { api =>
+        api.initResumableUpload(blob.getBucket, path, textPlain, bodyText.getBytes().length.toLong, Some(bodyMd5)).map {
+          uploadID =>
+            val _ = uploadID == gcsClient.get(blob).getGeneratedId()
+            //gcsClient.get(blob).getGeneratedId()
+        }
+      }
+        .bracket(_ => IO.delay(gcsExists(BlobId.of(bucket, path)))) { _ =>
+          IO.delay(gcsClient.delete(bucket, path)).as(())
+        }
+    }
+
+    uploadInitialized.unsafeRunSync() shouldBe true
+  }
+
+  // uploadBytes
 }
