@@ -381,8 +381,8 @@ class GcsApiIntegrationSpec
     objectExists.unsafeRunSync() shouldBe true
   }
 
-  // initResumableUpload
-  it should "initialize a resumable upload" in {
+  // initResumableUpload & uploadBytes
+  /*it should "initialize a resumable upload" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
 
     val uploadInitialized = writeGzippedTestFile.use { blob =>
@@ -390,7 +390,7 @@ class GcsApiIntegrationSpec
         api.initResumableUpload(blob.getBucket, path, textPlain, bodyText.getBytes().length.toLong, Some(bodyMd5)).map {
           uploadID =>
             val _ = uploadID == gcsClient.get(blob).getGeneratedId()
-            //gcsClient.get(blob).getGeneratedId()
+          //gcsClient.get(blob).getGeneratedId()
         }
       }
         .bracket(_ => IO.delay(gcsExists(BlobId.of(bucket, path)))) { _ =>
@@ -399,7 +399,21 @@ class GcsApiIntegrationSpec
     }
 
     uploadInitialized.unsafeRunSync() shouldBe true
+  }*/
+
+  it should "upload files using resumable uploads" in {
+    ???
   }
 
-  // uploadBytes
+  it should "upload files using resumable uploads over multiple upload calls" in {
+    ???
+  }
+
+  it should "report failure if attempting to upload to an uninitialized ID" in {
+    ???
+  }
+
+  it should "report failure if data uploaded in a resumable upload doesn't match the expected md5" in {
+    ???
+  }
 }
