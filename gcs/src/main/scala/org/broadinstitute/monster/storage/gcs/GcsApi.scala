@@ -123,28 +123,6 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
   }
 
   /**
-    * Build object metadata to include in upload requests to GCS.
-    *
-    * @param path the path of the object that will be uploaded, relative to its
-    *             enclosing bucket
-    * @param expectedMd5 an optional md5 which the object's contents should match
-    *                    after the upload completes. Triggers server-side content
-    *                    validation if included in the upload request
-    */
-  private def buildUploadMetadata(path: String, expectedMd5: Option[String]): Json = {
-    // Object metadata is used by Google to register the upload to the correct pseudo-path.
-    val baseObjectMetadata = JsonObject("name" -> path.asJson)
-    expectedMd5
-      .fold(baseObjectMetadata) { hexMd5 =>
-        baseObjectMetadata.add(
-          ObjectMd5Key,
-          Base64.encodeBase64String(Hex.decodeHex(hexMd5.toCharArray)).asJson
-        )
-      }
-      .asJson
-  }
-
-  /**
     * Create a new object in GCS using a multipart upload.
     *
     * One-shot uploads are recommended for any object less than 5MB. Multipart is the one
@@ -169,25 +147,26 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     val multipartBoundary = Boundary.create
     val objectMetadata = buildUploadMetadata(path, expectedMd5)
 
-    val dataHeader =
-      s"""--${multipartBoundary.value}
-         |${applicationJsonContentType.renderString}
-         |
-         |${objectMetadata.noSpaces}
-         |
-         |--${multipartBoundary.value}
-         |${contentType.renderString}
-         |
-         |""".stripMargin.getBytes
+    val delimiter = s"--${multipartBoundary.value}"
+    val end = s"$delimiter--"
 
-    val dataFooter =
-      s"""
-         |--${multipartBoundary.value}--""".stripMargin.getBytes
+    val dataHeader = List(
+      delimiter,
+      applicationJsonContentType.renderString,
+      "",
+      objectMetadata.noSpaces,
+      "",
+      delimiter,
+      contentType.renderString,
+      ""
+    ).mkString("", Boundary.CRLF, Boundary.CRLF)
+
+    val dataFooter = List("", end).mkString(Boundary.CRLF)
 
     val fullBody = Stream
-      .emits(dataHeader)
+      .emits(dataHeader.getBytes)
       .append(data)
-      .append(Stream.emits(dataFooter))
+      .append(Stream.emits(dataFooter.getBytes))
 
     fullBody.compile.toChunk.flatMap { chunk =>
       val fullHeaders = Headers.of(
@@ -510,4 +489,29 @@ object GcsApi {
     * upload succeeds, but the server still expects more bytes.
     */
   val ResumeIncompleteStatus = Status(308, "Resume Incomplete")
+
+  /**
+    * Build object metadata to include in upload requests to GCS.
+    *
+    * @param path the path of the object that will be uploaded, relative to its
+    *             enclosing bucket
+    * @param expectedMd5 an optional md5 which the object's contents should match
+    *                    after the upload completes. Triggers server-side content
+    *                    validation if included in the upload request
+    */
+  private[gcs] def buildUploadMetadata(
+    path: String,
+    expectedMd5: Option[String]
+  ): Json = {
+    // Object metadata is used by Google to register the upload to the correct pseudo-path.
+    val baseObjectMetadata = JsonObject("name" -> path.asJson)
+    expectedMd5
+      .fold(baseObjectMetadata) { hexMd5 =>
+        baseObjectMetadata.add(
+          ObjectMd5Key,
+          Base64.encodeBase64String(Hex.decodeHex(hexMd5.toCharArray)).asJson
+        )
+      }
+      .asJson
+  }
 }

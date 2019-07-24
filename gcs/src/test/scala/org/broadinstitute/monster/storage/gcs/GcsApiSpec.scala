@@ -6,11 +6,12 @@ import fs2.Stream
 import org.apache.commons.codec.digest.DigestUtils
 import org.http4s._
 import org.http4s.headers._
-import org.scalatest.{FlatSpec, Matchers}
+import org.http4s.multipart.Multipart
+import org.scalatest.{EitherValues, FlatSpec, Matchers, OptionValues}
 
 import scala.collection.mutable.ArrayBuffer
 
-class GcsApiSpec extends FlatSpec with Matchers {
+class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherValues {
   import GcsApi._
 
   private val bucket = "bucket"
@@ -264,28 +265,64 @@ class GcsApiSpec extends FlatSpec with Matchers {
   }
 
   // createObject
-  it should "create a GCS object" in {
-    val api = new GcsApi(req => {
-      req.method shouldBe Method.POST
-      req.uri shouldBe createObjectURI
+  def testCreateObject(expectedMd5: Option[String]): Unit = {
+    val description = if (expectedMd5.isDefined) {
+      "include expected md5s in multipart upload requests"
+    } else {
+      "create a GCS object using a multipart upload"
+    }
 
-      Resource.pure(
-        Response[IO](
-          status = Status.Ok
+    it should description in {
+      val api = new GcsApi(req => {
+        req.method shouldBe Method.POST
+        req.uri shouldBe createObjectURI
+        req.contentType.value.mediaType.isMultipart shouldBe true
+
+        val dataChecks = req.as[Multipart[IO]].flatMap {
+          multipart =>
+            multipart.parts.size shouldBe 2
+            val metadataPart = multipart.parts(0)
+            val dataPart = multipart.parts(1)
+
+            metadataPart.headers
+              .get(`Content-Type`)
+              .value
+              .mediaType shouldBe MediaType.application.json
+            dataPart.headers
+              .get(`Content-Type`)
+              .value shouldBe `Content-Type`(MediaType.`text/event-stream`)
+
+            metadataPart.body.compile.toChunk.flatMap { metadataBytes =>
+              io.circe.parser
+                .parse(new String(metadataBytes.toArray[Byte]))
+                .right
+                .value shouldBe GcsApi.buildUploadMetadata(path, expectedMd5)
+
+              dataPart.body.compile.toChunk.map { dataBytes =>
+                new String(dataBytes.toArray[Byte]) shouldBe bodyText
+              }
+            }
+        }
+
+        Resource.liftF(dataChecks).map { _ =>
+          Response[IO](status = Status.Ok)
+        }
+      })
+
+      api
+        .createObject(
+          bucket,
+          path,
+          `Content-Type`(MediaType.`text/event-stream`),
+          expectedMd5,
+          bodyStream
         )
-      )
-    })
-
-    api
-      .createObject(
-        bucket,
-        path,
-        `Content-Type`(MediaType.`text/event-stream`),
-        Some(theMd5),
-        bodyStream
-      )
-      .unsafeRunSync()
+        .unsafeRunSync()
+    }
   }
+
+  it should behave like testCreateObject(None)
+  it should behave like testCreateObject(Some(theMd5))
 
   // deleteObject
   it should "delete a GCS object" in {
@@ -317,6 +354,51 @@ class GcsApiSpec extends FlatSpec with Matchers {
             Header(GcsApi.UploadContentLengthHeader, bodyTextNumberOfBytes.toString),
             Header(GcsApi.UploadContentTypeHeader, "text/event-stream")
           )
+
+          io.circe.parser
+            .parse(new String(bodyChunk.toArray[Byte]))
+            .right
+            .value shouldBe GcsApi.buildUploadMetadata(path, None)
+      }
+
+      Resource.liftF(checks).map { _ =>
+        Response[IO](
+          status = Status.Ok,
+          headers = Headers.of(
+            Header(GcsApi.UploadIDHeader, uploadToken)
+          )
+        )
+      }
+    })
+
+    api
+      .initResumableUpload(
+        bucket,
+        path,
+        `Content-Type`(MediaType.`text/event-stream`),
+        bodyTextNumberOfBytes.toLong,
+        None
+      )
+      .unsafeRunSync() shouldBe uploadToken
+  }
+
+  it should "initialize a resumable upload with an expected md5" in {
+    val api = new GcsApi(req => {
+      val checks = req.body.compile.toChunk.map {
+        bodyChunk =>
+          req.method shouldBe Method.POST
+          req.uri shouldBe initResumableUploadURI
+          req.headers.toList should contain theSameElementsAs List(
+            `Content-Length`.unsafeFromLong(bodyChunk.size.toLong),
+            `Content-Type`(MediaType.application.json, Charset.`UTF-8`),
+            Header(GcsApi.UploadContentLengthHeader, bodyTextNumberOfBytes.toString),
+            Header(GcsApi.UploadContentTypeHeader, "text/event-stream")
+          )
+
+          io.circe.parser
+            .parse(new String(bodyChunk.toArray[Byte]))
+            .right
+            .value shouldBe GcsApi.buildUploadMetadata(path, Some(theMd5))
       }
 
       Resource.liftF(checks).map { _ =>
