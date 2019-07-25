@@ -1,173 +1,152 @@
 package org.broadinstitute.monster.storage.gcs
 
 import cats.effect.{IO, Resource}
-import cats.implicits._
+//import cats.implicits._
 import fs2.Stream
-import org.apache.commons.codec.digest.DigestUtils
 import org.http4s._
 import org.http4s.headers._
-import org.http4s.multipart.Multipart
+//import org.http4s.multipart.Multipart
 import org.scalatest.{EitherValues, FlatSpec, Matchers, OptionValues}
 
-import scala.collection.mutable.ArrayBuffer
+//import scala.collection.mutable.ArrayBuffer
 
 class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherValues {
   import GcsApi._
 
+  private val smallChunkSize = 16
+
   private val bucket = "bucket"
   private val path = "the/path"
-  private val uploadToken = "upload-token"
+  //private val uploadToken = "upload-token"
 
   // numberOfChunks of the bodyText MUST BE SMALLER THAN bodyTextNumberOfBytes
-  private val bodyText = "Some example body text"
-  private val bodyStream = Stream.emits(bodyText.getBytes.toSeq).covary[IO]
-  private val bodyTextNumberOfBytes = bodyText.getBytes().length
-  private val numberOfChunks = 4
-  private val theMd5 = DigestUtils.md5Hex(bodyText)
+  private def bodyText(n: Long): Stream[IO, Byte] =
+    Stream
+      .randomSeeded(n)[IO]
+      .take(n)
+      .map(String.valueOf)
+      .flatMap(s => Stream.emits(s.getBytes))
+  private def stringify(bytes: Stream[IO, Byte]): IO[String] =
+    bytes.through(fs2.text.utf8Decode).compile.toChunk.map(_.toArray[String].mkString(""))
 
-  private val baseUri = baseGcsUri(bucket, path)
-  private val readObjectURI = baseUri.copy(query = Query.fromPairs("alt" -> "media"))
-  private val statObjectURI = baseUri.copy(query = Query.fromPairs("alt" -> "json"))
-  private val initResumableUploadURI = GcsApi.baseGcsUploadUri(bucket, "resumable")
+  private val readObjectURI = baseGcsUri(bucket, path, "alt" -> "media")
+  private val statObjectURI = baseGcsUri(bucket, path, "alt" -> "json")
+  /*private val initResumableUploadURI = baseGcsUploadUri(bucket, "resumable")
   private val uploadURI =
-    baseGcsUploadUri(bucket, "resumable").copy(
-      query = Query.fromPairs("uploadType" -> "resumable", "upload_id" -> uploadToken)
-    )
-  private val createObjectURI = baseGcsUploadUri(bucket, "multipart")
+    baseGcsUploadUri(bucket, "resumable").withQueryParam("upload_id", uploadToken)
+  private val createObjectURI = baseGcsUploadUri(bucket, "multipart")*/
 
   private val acceptEncodingHeader = Header("Accept-Encoding", "identity, gzip")
 
   behavior of "GcsApi"
 
   // readObject
-  it should "read entire objects as a stream" in {
-    val api = new GcsApi(req => {
-      req.method shouldBe Method.GET
-      req.uri shouldBe readObjectURI
-      req.headers.toList should contain theSameElementsAs List(
-        acceptEncodingHeader,
-        Header("Range", "bytes=0-")
-      )
-      Resource.pure(Response[IO](body = bodyStream))
-    })
+  def testReadObject(
+    description: String,
+    numBytes: Int = smallChunkSize,
+    start: Long = 0,
+    end: Option[Long] = None,
+    gzip: Boolean = false,
+    forceGunzip: Boolean = false
+  ): Unit = {
+    it should description in {
+      val baseBytes = bodyText(numBytes.toLong)
+      val body = if (gzip) {
+        baseBytes.through(fs2.compress.gzip(ChunkSize))
+      } else {
+        baseBytes
+      }
 
-    api
-      .readObject(bucket, path)
-      .through(fs2.text.utf8Decode)
-      .compile
-      .toChunk
-      .map(_.toArray[String].mkString(""))
-      .unsafeRunSync() shouldBe bodyText
-  }
+      val api = new GcsApi(req => {
+        req.method shouldBe Method.GET
 
-  it should "gunzip compressed data if told to" in {
-    val api = new GcsApi(req => {
-      req.method shouldBe Method.GET
-      req.uri shouldBe readObjectURI
-      req.headers.toList should contain theSameElementsAs List(
-        acceptEncodingHeader,
-        Header("Range", "bytes=0-")
-      )
-      Resource.pure {
-        Response[IO](
-          body = bodyStream.through(fs2.compress.gzip(GcsApi.GunzipBufferSize)),
-          headers = Headers.of(Header("Content-Encoding", "gzip"))
+        if (req.uri == statObjectURI) {
+          Resource.liftF(body.compile.toChunk).map { chunk =>
+            val metadata = if (gzip) {
+              s"""{ "$ObjectSizeKey": ${chunk.size}, "$ObjectEncodingKey": "gzip" }"""
+            } else {
+              s"""{ "$ObjectSizeKey": ${chunk.size} }"""
+            }
+            Response[IO](body = Stream.emits(metadata.getBytes))
+          }
+        } else if (req.uri == readObjectURI) {
+          req.headers.toList should contain(acceptEncodingHeader)
+
+          val getRange = for {
+            header <- req.headers.get(Range)
+            end <- header.ranges.head.second
+          } yield {
+            (header.ranges.head.first, end)
+          }
+
+          getRange match {
+            case None =>
+              Resource.liftF(IO.raiseError(new Exception("Got request without range")))
+            case Some((start, end)) =>
+              val slice = body.drop(start).take(end - start + 1)
+              Resource.pure(Response[IO](body = slice))
+          }
+        } else {
+          Resource.liftF(IO.raiseError(new Exception(s"Saw unexpected URI: ${req.uri}")))
+        }
+      })
+
+      val actual = stringify {
+        api.readObjectByChunks(
+          bucket,
+          path,
+          fromByte = start,
+          untilByte = end,
+          chunkSize = smallChunkSize,
+          gunzipIfNeeded = gzip || forceGunzip
         )
       }
-    })
+      val expected = stringify {
+        val base = if (gzip) {
+          body.through(fs2.compress.gunzip(ChunkSize))
+        } else {
+          body
+        }.drop(start)
 
-    api
-      .readObject(bucket, path, gunzipIfNeeded = true)
-      .through(fs2.text.utf8Decode)
-      .compile
-      .toChunk
-      .map(_.toArray[String].mkString(""))
-      .unsafeRunSync() shouldBe bodyText
+        end.fold(base)(n => base.take(n - start + 1))
+      }
+
+      actual.unsafeRunSync() shouldBe expected.unsafeRunSync()
+    }
   }
 
-  it should "not gunzip uncompressed data" in {
-    val api = new GcsApi(req => {
-      req.method shouldBe Method.GET
-      req.uri shouldBe readObjectURI
-      req.headers.toList should contain theSameElementsAs List(
-        acceptEncodingHeader,
-        Header("Range", "bytes=0-")
-      )
-      Resource.pure(Response[IO](body = bodyStream))
-    })
+  it should behave like testReadObject("read entire objects as a stream")
 
-    api
-      .readObject(bucket, path, gunzipIfNeeded = true)
-      .through(fs2.text.utf8Decode)
-      .compile
-      .toChunk
-      .map(_.toArray[String].mkString(""))
-      .unsafeRunSync() shouldBe bodyText
-  }
+  it should behave like testReadObject(
+    "read objects as a stream, using multiple requests",
+    numBytes = (smallChunkSize * 2.5).toInt
+  )
 
-  it should "read objects starting at an offset" in {
-    val start = 100L
-    val api = new GcsApi(req => {
-      req.method shouldBe Method.GET
-      req.uri shouldBe readObjectURI
-      req.headers.toList should contain theSameElementsAs List(
-        acceptEncodingHeader,
-        Header("Range", s"bytes=$start-")
-      )
-      Resource.pure(Response[IO](body = bodyStream))
-    })
+  it should behave like testReadObject(
+    "gunzip compressed data if told to",
+    gzip = true
+  )
 
-    api
-      .readObject(bucket, path, fromByte = start)
-      .through(fs2.text.utf8Decode)
-      .compile
-      .toChunk
-      .map(_.toArray[String].mkString(""))
-      .unsafeRunSync() shouldBe bodyText
-  }
+  it should behave like testReadObject(
+    "not gunzip uncompressed data",
+    forceGunzip = true
+  )
 
-  it should "read objects ending before the final byte" in {
-    val end = 1000L
-    val api = new GcsApi(req => {
-      req.method shouldBe Method.GET
-      req.uri shouldBe readObjectURI
-      req.headers.toList should contain theSameElementsAs List(
-        acceptEncodingHeader,
-        Header("Range", s"bytes=0-${end - 1}")
-      )
-      Resource.pure(Response[IO](body = bodyStream))
-    })
+  it should behave like testReadObject(
+    "read objects starting at an offset",
+    start = 100L
+  )
 
-    api
-      .readObject(bucket, path, untilByte = Some(end))
-      .through(fs2.text.utf8Decode)
-      .compile
-      .toChunk
-      .map(_.toArray[String].mkString(""))
-      .unsafeRunSync() shouldBe bodyText
-  }
+  it should behave like testReadObject(
+    "read objects ending before the final byte",
+    end = Some(1000L)
+  )
 
-  it should "read slices in the middle of an object" in {
-    val start = 100L
-    val end = 1000L
-    val api = new GcsApi(req => {
-      req.method shouldBe Method.GET
-      req.uri shouldBe readObjectURI
-      req.headers.toList should contain theSameElementsAs List(
-        acceptEncodingHeader,
-        Header("Range", s"bytes=$start-${end - 1}")
-      )
-      Resource.pure(Response[IO](body = bodyStream))
-    })
-
-    api
-      .readObject(bucket, path, fromByte = start, untilByte = Some(end))
-      .through(fs2.text.utf8Decode)
-      .compile
-      .toChunk
-      .map(_.toArray[String].mkString(""))
-      .unsafeRunSync() shouldBe bodyText
-  }
+  it should behave like testReadObject(
+    "read slices in the middle of an object",
+    start = 100L,
+    end = Some(1000L)
+  )
 
   it should "report failure if reading an object returns a 4XX code" in {
     val err =
@@ -249,6 +228,8 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   }
 
   it should "return the md5 of an existing object" in {
+    val theMd5 = "abcdefg"
+
     val api = new GcsApi(req => {
       req.method shouldBe Method.GET
       req.uri shouldBe statObjectURI
@@ -263,7 +244,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       .statObject(bucket, path)
       .unsafeRunSync() shouldBe (true -> Some(theMd5))
   }
-
+  /*
   // createObject
   def testCreateObject(expectedMd5: Option[String]): Unit = {
     val description = if (expectedMd5.isDefined) {
@@ -299,7 +280,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
                 .value shouldBe GcsApi.buildUploadMetadata(path, expectedMd5)
 
               dataPart.body.compile.toChunk.map { dataBytes =>
-                new String(dataBytes.toArray[Byte]) shouldBe bodyText
+                new String(dataBytes.toArray[Byte]) shouldBe ???
               }
             }
         }
@@ -315,20 +296,20 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
           path,
           `Content-Type`(MediaType.`text/event-stream`),
           expectedMd5,
-          bodyStream
+          ???
         )
         .unsafeRunSync()
     }
   }
 
   it should behave like testCreateObject(None)
-  it should behave like testCreateObject(Some(theMd5))
+  it should behave like testCreateObject(Some(???))
 
   // deleteObject
   it should "delete a GCS object" in {
     val api = new GcsApi(req => {
       req.method shouldBe Method.DELETE
-      req.uri shouldBe baseUri
+      req.uri shouldBe ???
       Resource.pure(
         Response[IO](
           status = Status.Ok
@@ -351,7 +332,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
           req.headers.toList should contain theSameElementsAs List(
             `Content-Length`.unsafeFromLong(bodyChunk.size.toLong),
             `Content-Type`(MediaType.application.json, Charset.`UTF-8`),
-            Header(GcsApi.UploadContentLengthHeader, bodyTextNumberOfBytes.toString),
+            Header(GcsApi.UploadContentLengthHeader, ???),
             Header(GcsApi.UploadContentTypeHeader, "text/event-stream")
           )
 
@@ -376,7 +357,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
         bucket,
         path,
         `Content-Type`(MediaType.`text/event-stream`),
-        bodyTextNumberOfBytes.toLong,
+        ???,
         None
       )
       .unsafeRunSync() shouldBe uploadToken
@@ -391,14 +372,14 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
           req.headers.toList should contain theSameElementsAs List(
             `Content-Length`.unsafeFromLong(bodyChunk.size.toLong),
             `Content-Type`(MediaType.application.json, Charset.`UTF-8`),
-            Header(GcsApi.UploadContentLengthHeader, bodyTextNumberOfBytes.toString),
+            Header(GcsApi.UploadContentLengthHeader, ???),
             Header(GcsApi.UploadContentTypeHeader, "text/event-stream")
           )
 
           io.circe.parser
             .parse(new String(bodyChunk.toArray[Byte]))
             .right
-            .value shouldBe GcsApi.buildUploadMetadata(path, Some(theMd5))
+            .value shouldBe GcsApi.buildUploadMetadata(path, Some(???))
       }
 
       Resource.liftF(checks).map { _ =>
@@ -416,8 +397,8 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
         bucket,
         path,
         `Content-Type`(MediaType.`text/event-stream`),
-        bodyTextNumberOfBytes.toLong,
-        Some(theMd5)
+        ???,
+        Some(???)
       )
       .unsafeRunSync() shouldBe uploadToken
   }
@@ -425,13 +406,13 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   // uploadBytes
   it should "upload bytes to a resumable upload in a single chunk" in {
     val api = new GcsApi(req => {
-      val contentRangeEnd = bodyTextNumberOfBytes.toLong - 1
+      val contentRangeEnd = ???
       val checks = req.body.compile.toChunk.map { chunk =>
         req.method shouldBe Method.PUT
         req.uri shouldBe uploadURI
         req.headers.toList should contain theSameElementsAs List(
           `Content-Length`.unsafeFromLong(chunk.size.toLong),
-          `Content-Range`(0L, contentRangeEnd.toLong)
+          `Content-Range`(0L, ???)
         )
       }
 
@@ -448,8 +429,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
         bucket,
         uploadToken,
         0,
-        bodyStream,
-        bodyTextNumberOfBytes * 2
+        ???
       )
       .unsafeRunSync() shouldBe Right(())
   }
@@ -461,14 +441,14 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
         req.uri shouldBe uploadURI
         req.headers.toList should contain theSameElementsAs List(
           `Content-Length`.unsafeFromLong(chunk.size.toLong),
-          `Content-Range`(0L, bodyTextNumberOfBytes.toLong - 1)
+          `Content-Range`(0L, ???)
         )
       }
 
       Resource.liftF(checks).map { _ =>
         Response[IO](
           status = ResumeIncompleteStatus,
-          headers = Headers.of(Range(0L, bodyTextNumberOfBytes.toLong - 1))
+          headers = Headers.of(Range(0L, ???))
         )
       }
     })
@@ -478,14 +458,12 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
         bucket,
         uploadToken,
         0,
-        bodyStream,
-        bodyTextNumberOfBytes * 2
+        ???
       )
-      .unsafeRunSync() shouldBe Left(bodyTextNumberOfBytes)
+      .unsafeRunSync() shouldBe Left(???)
   }
 
   it should "upload bytes to a resumable upload in multiple chunks" in {
-    val bytesPerRequest = bodyTextNumberOfBytes / numberOfChunks
     val ranges = new ArrayBuffer[(Long, Long)]()
 
     val api = new GcsApi(req => {
@@ -512,8 +490,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
           ranges += (min -> max)
 
           Response[IO](
-            status =
-              if (max == bodyTextNumberOfBytes - 1) Status.Ok else ResumeIncompleteStatus,
+            status = if (max == ???) Status.Ok else ResumeIncompleteStatus,
             headers = Headers.of(Range(0, max))
           )
       }
@@ -524,23 +501,21 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
         bucket,
         uploadToken,
         0,
-        bodyStream,
-        bytesPerRequest
+        ???
       )
       .unsafeRunSync() shouldBe Right(())
 
-    ranges shouldBe (0 to numberOfChunks).map { index =>
-      val chunkStart = index * bytesPerRequest
-      if (index < numberOfChunks) {
-        (chunkStart, chunkStart + bytesPerRequest - 1)
+    ranges shouldBe (0 to ???).map { index =>
+      val chunkStart = index * ???
+      if (index < ???) {
+        (chunkStart, chunkStart + ???)
       } else {
-        (chunkStart, chunkStart + (bodyTextNumberOfBytes % bytesPerRequest) - 1)
+        (chunkStart, chunkStart + ???)
       }
     }
   }
 
   it should "upload bytes to a resumable upload in multiple chunks, without finishing" in {
-    val bytesPerRequest = bodyTextNumberOfBytes / numberOfChunks
     val ranges = new ArrayBuffer[(Long, Long)]()
 
     val api = new GcsApi(req => {
@@ -578,17 +553,16 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
         bucket,
         uploadToken,
         0,
-        bodyStream,
-        bytesPerRequest
+        ???
       )
-      .unsafeRunSync() shouldBe Left(bodyTextNumberOfBytes)
+      .unsafeRunSync() shouldBe Left(???)
 
-    ranges shouldBe (0 to numberOfChunks).map { index =>
-      val chunkStart = index * bytesPerRequest
-      if (index < numberOfChunks) {
-        (chunkStart, chunkStart + bytesPerRequest - 1)
+    ranges shouldBe (0 to ???).map { index =>
+      val chunkStart = index * ???
+      if (index < ???) {
+        (chunkStart, chunkStart + ???)
       } else {
-        (chunkStart, chunkStart + (bodyTextNumberOfBytes % bytesPerRequest) - 1)
+        (chunkStart, chunkStart + ???)
       }
     }
   }
@@ -630,7 +604,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     })
 
     api
-      .uploadBytes(bucket, uploadToken, 100, bytes, 100)
+      .uploadBytes(bucket, uploadToken, 100, bytes)
       .unsafeRunSync() shouldBe Left(200)
 
     ranges shouldBe List(100 -> 199, 180 -> 199)
@@ -673,7 +647,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     })
 
     api
-      .uploadBytes(bucket, uploadToken, 50, bytes, 50)
+      .uploadBytes(bucket, uploadToken, 50, bytes)
       .unsafeRunSync() shouldBe Right(())
 
     ranges shouldBe List(
@@ -682,5 +656,5 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       126 -> 149,
       135 -> 149
     )
-  }
+  }*/
 }

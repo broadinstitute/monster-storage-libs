@@ -131,6 +131,20 @@ class GcsApiIntegrationSpec
     }.unsafeRunSync() shouldBe bodyText
   }
 
+  it should "read objects with a configurable chunk size" in {
+    writeTestFile.use { blob =>
+      withClient { api =>
+        buildString(
+          api.readObject(
+            blob.getBucket,
+            blob.getName,
+            bytesPerRequest = bodyText.length / 4
+          )
+        )
+      }
+    }.unsafeRunSync() shouldBe bodyText
+  }
+
   /*
    * For users hosting static content in buckets, GCS offers the
    * convenience of server-side decompression for objects with a
@@ -148,7 +162,19 @@ class GcsApiIntegrationSpec
         buildString {
           api
             .readObject(blob.getBucket, blob.getName)
-            .through(fs2.compress.gunzip(1024 * 1024))
+            .through(fs2.compress.gunzip(GcsApi.ChunkSize))
+        }
+      }
+    }.unsafeRunSync() shouldBe bodyText
+  }
+
+  it should "read gzipped data as-is, with a configurable chunk size" in {
+    writeGzippedTestFile.use { blob =>
+      withClient { api =>
+        buildString {
+          api
+            .readObject(blob.getBucket, blob.getName, bytesPerRequest = 64)
+            .through(fs2.compress.gunzip(GcsApi.ChunkSize))
         }
       }
     }.unsafeRunSync() shouldBe bodyText
@@ -159,6 +185,21 @@ class GcsApiIntegrationSpec
       withClient { api =>
         buildString {
           api.readObject(blob.getBucket, blob.getName, gunzipIfNeeded = true)
+        }
+      }
+    }.unsafeRunSync() shouldBe bodyText
+  }
+
+  it should "read gzipped data with client-side decompression and configurable chunk size" in {
+    writeGzippedTestFile.use { blob =>
+      withClient { api =>
+        buildString {
+          api.readObjectByChunks(
+            blob.getBucket,
+            blob.getName,
+            gunzipIfNeeded = true,
+            bytesPerRequest = 64
+          )
         }
       }
     }.unsafeRunSync() shouldBe bodyText
@@ -182,6 +223,8 @@ class GcsApiIntegrationSpec
     }.unsafeRunSync() shouldBe new String(bodyText.getBytes.drop(128))
   }
 
+
+
   it should "read gzipped objects starting at an offset" in {
     val readText = writeGzippedTestFile.use { blob =>
       withClient { api =>
@@ -191,7 +234,7 @@ class GcsApiIntegrationSpec
 
     val expected = Stream
       .emits(bodyText.getBytes)
-      .through(fs2.compress.gzip(1024 * 1024))
+      .through(fs2.compress.gzip(GcsApi.ChunkSize))
       .drop(10)
       .compile
       .toVector
@@ -221,7 +264,7 @@ class GcsApiIntegrationSpec
 
     val expected = Stream
       .emits(bodyText.getBytes)
-      .through(fs2.compress.gzip(1024 * 1024))
+      .through(fs2.compress.gzip(GcsApi.ChunkSize))
       .take(10)
       .compile
       .toVector
@@ -287,7 +330,6 @@ class GcsApiIntegrationSpec
 
     wasDeleted.unsafeRunSync() shouldBe true
   }
-
 
   it should "return false if deleting a GCS object that doesn't exist" in {
     val wasDeleted = withClient(_.deleteObject(bucket, "foobar"))
@@ -357,8 +399,11 @@ class GcsApiIntegrationSpec
   it should "should check if a GCS object exists and return true with a Md5 " in {
     val objectExists = writeGzippedTestFile.use { blob =>
       withClient { api =>
-        api.statObject(blob.getBucket, blob.getName).map { case(reportsObjectExists, reportedMd5) =>
-          gcsExists(blob) && reportsObjectExists && reportedMd5.get == gcsClient.get(blob).getMd5
+        api.statObject(blob.getBucket, blob.getName).map {
+          case (reportsObjectExists, reportedMd5) =>
+            gcsExists(blob) && reportsObjectExists && reportedMd5.get == gcsClient
+              .get(blob)
+              .getMd5
         }
       }
     }
@@ -369,11 +414,11 @@ class GcsApiIntegrationSpec
   it should "should check if a GCS object exists and return false" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
 
-
     val objectExists = writeGzippedTestFile.use { blob =>
       withClient { api =>
-        api.statObject(blob.getBucket, path).map { case(reportsObjectExists, reportedMd5) =>
-          !(gcsExists(blob) && reportsObjectExists) && reportedMd5.isEmpty
+        api.statObject(blob.getBucket, path).map {
+          case (reportsObjectExists, reportedMd5) =>
+            !(gcsExists(blob) && reportsObjectExists) && reportedMd5.isEmpty
         }
       }
     }
