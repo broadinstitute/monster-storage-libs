@@ -313,23 +313,29 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   )
 
   // deleteObject
-  /*
-  it should "delete a GCS object" in {
-    val api = new GcsApi(req => {
-      req.method shouldBe Method.DELETE
-      req.uri shouldBe ???
-      Resource.pure(
-        Response[IO](
-          status = Status.Ok
-        )
-      )
-    })
+  def testDeleteObject(description: String, exists: Boolean): Unit = {
+    it should description in {
+      val api = new GcsApi(req => {
+        req.method shouldBe Method.DELETE
+        req.uri shouldBe baseGcsUri(bucket, path)
+        Resource.pure(Response[IO](status = if (exists) Status.Ok else Status.NotFound))
+      })
 
-    api
-      .deleteObject(bucket, path)
-      .unsafeRunSync()
+      api.deleteObject(bucket, path).unsafeRunSync() shouldBe exists
+    }
   }
 
+  it should behave like testDeleteObject(
+    "delete a GCS object and return true",
+    exists = true
+  )
+
+  it should behave like testDeleteObject(
+    "no-op when deleting a GCS object that doesn't exist, and return false",
+    exists = false
+  )
+
+  /*
   // initResumableUpload
   it should "initialize a resumable upload" in {
     val api = new GcsApi(req => {
