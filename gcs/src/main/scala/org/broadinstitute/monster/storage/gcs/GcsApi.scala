@@ -301,13 +301,23 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     uploadToken: String,
     rangeStart: Long,
     data: Stream[IO, Byte]
+  ): IO[Either[Long, Unit]] =
+    uploadByteChunks(bucket, uploadToken, rangeStart, ChunkSize, data)
+
+  /** TODO */
+  private[gcs] def uploadByteChunks(
+    bucket: String,
+    uploadToken: String,
+    rangeStart: Long,
+    chunkSize: Int,
+    data: Stream[IO, Byte]
   ): IO[Either[Long, Unit]] = {
 
     // Helper method to incrementally push data from the input stream to GCS.
     def pushChunks(start: Long, data: Stream[IO, Byte]): Pull[IO, Nothing, Option[Long]] =
       // Pull the first chunk of data off the front of the stream.
       data.pull
-        .unconsN(ChunkSize, allowFewer = true)
+        .unconsN(chunkSize, allowFewer = true)
         .flatMap {
           // If the stream was empty, mark that we haven't made any progress
           // from the initial byte.

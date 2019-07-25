@@ -2,14 +2,14 @@ package org.broadinstitute.monster.storage.gcs
 
 import cats.effect.{IO, Resource}
 import org.apache.commons.codec.digest.DigestUtils
-//import cats.implicits._
+import cats.implicits._
 import fs2.Stream
 import org.http4s._
 import org.http4s.headers._
 import org.http4s.multipart.Multipart
 import org.scalatest.{EitherValues, FlatSpec, Matchers, OptionValues}
 
-//import scala.collection.mutable.ArrayBuffer
+import scala.collection.mutable.ArrayBuffer
 
 class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherValues {
   import GcsApi._
@@ -23,17 +23,17 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   private val statObjectURI = baseGcsUri(bucket, path, "alt" -> "json")
   private val createObjectURI = baseGcsUploadUri(bucket, "multipart")
   private val initResumableUploadURI = baseGcsUploadUri(bucket, "resumable")
-  /*private val uploadURI =
-    baseGcsUploadUri(bucket, "resumable").withQueryParam("upload_id", uploadToken)*/
+  private val uploadURI =
+    baseGcsUploadUri(bucket, "resumable").withQueryParam("upload_id", uploadToken)
 
   private val acceptEncodingHeader = Header("Accept-Encoding", "identity, gzip")
 
-  private def bodyText(n: Long): Stream[IO, Byte] =
+  private def bodyText(n: Int): Stream[IO, Byte] =
     Stream
-      .randomSeeded(n)[IO]
-      .take(n)
+      .randomSeeded(n.toLong)[IO]
       .map(String.valueOf)
       .flatMap(s => Stream.emits(s.getBytes))
+      .take(n.toLong)
   private def stringify(bytes: Stream[IO, Byte]): IO[String] =
     bytes.through(fs2.text.utf8Decode).compile.toChunk.map(_.toArray[String].mkString(""))
 
@@ -49,7 +49,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     forceGunzip: Boolean = false
   ): Unit = {
     it should description in {
-      val baseBytes = bodyText(numBytes.toLong)
+      val baseBytes = bodyText(numBytes)
       val body = if (gzip) {
         baseBytes.through(fs2.compress.gzip(ChunkSize))
       } else {
@@ -247,7 +247,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   // createObject
   def testCreateObject(description: String, includeMd5: Boolean): Unit = {
     it should description in {
-      val baseBytes = bodyText(smallChunkSize.toLong * 16)
+      val baseBytes = bodyText(smallChunkSize * 16)
 
       val doChecks = for {
         stringBody <- stringify(baseBytes)
@@ -389,259 +389,109 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     withMd5 = true
   )
 
-  /*
   // uploadBytes
-  it should "upload bytes to a resumable upload in a single chunk" in {
-    val api = new GcsApi(req => {
-      val contentRangeEnd = ???
-      val checks = req.body.compile.toChunk.map { chunk =>
-        req.method shouldBe Method.PUT
-        req.uri shouldBe uploadURI
-        req.headers.toList should contain theSameElementsAs List(
-          `Content-Length`.unsafeFromLong(chunk.size.toLong),
-          `Content-Range`(0L, ???)
-        )
-      }
+  def testUpload(
+    description: String,
+    allBytes: Boolean,
+    numBytes: Int = smallChunkSize,
+    start: Long = 0L,
+    recordedRatio: Double = 1.0
+  ): Unit = {
+    it should description in {
+      val ranges = new ArrayBuffer[(Long, Long)]()
 
-      Resource.liftF(checks).map { _ =>
-        Response[IO](
-          status = Status.Ok,
-          headers = Headers.of(Range(0L, contentRangeEnd))
-        )
-      }
-    })
+      val progressChunkSize = (smallChunkSize * recordedRatio).toInt
+      val lastByte = start + numBytes - 1
+      val bytes = bodyText(numBytes)
 
-    api
-      .uploadBytes(
-        bucket,
-        uploadToken,
-        0,
-        ???
-      )
-      .unsafeRunSync() shouldBe Right(())
-  }
-
-  it should "upload bytes to a resumable upload for a single chunk, without finishing" in {
-    val api = new GcsApi(req => {
-      val checks = req.body.compile.toChunk.map { chunk =>
-        req.method shouldBe Method.PUT
-        req.uri shouldBe uploadURI
-        req.headers.toList should contain theSameElementsAs List(
-          `Content-Length`.unsafeFromLong(chunk.size.toLong),
-          `Content-Range`(0L, ???)
-        )
-      }
-
-      Resource.liftF(checks).map { _ =>
-        Response[IO](
-          status = ResumeIncompleteStatus,
-          headers = Headers.of(Range(0L, ???))
-        )
-      }
-    })
-
-    api
-      .uploadBytes(
-        bucket,
-        uploadToken,
-        0,
-        ???
-      )
-      .unsafeRunSync() shouldBe Left(???)
-  }
-
-  it should "upload bytes to a resumable upload in multiple chunks" in {
-    val ranges = new ArrayBuffer[(Long, Long)]()
-
-    val api = new GcsApi(req => {
-      val checks = req.body.compile.toChunk.map { chunk =>
-        req.method shouldBe Method.PUT
-        req.uri shouldBe uploadURI
-        req.headers.toList should contain(
-          `Content-Length`.unsafeFromLong(chunk.size.toLong)
-        )
-      }
-
-      val getRange = for {
-        _ <- checks
-        header <- req.headers
-          .get(`Content-Range`)
-          .liftTo[IO](new RuntimeException)
-        max <- header.range.second.liftTo[IO](new RuntimeException)
-      } yield {
-        (header.range.first, max)
-      }
-
-      Resource.liftF(getRange).map {
-        case (min, max) =>
-          ranges += (min -> max)
-
-          Response[IO](
-            status = if (max == ???) Status.Ok else ResumeIncompleteStatus,
-            headers = Headers.of(Range(0, max))
+      val api = new GcsApi(req => {
+        val checks = req.body.compile.toChunk.map { chunk =>
+          req.method shouldBe Method.PUT
+          req.uri shouldBe uploadURI
+          req.headers.toList should contain(
+            `Content-Length`.unsafeFromLong(chunk.size.toLong)
           )
-      }
-    })
+        }
 
-    api
-      .uploadBytes(
-        bucket,
-        uploadToken,
-        0,
-        ???
-      )
-      .unsafeRunSync() shouldBe Right(())
+        val getRange = for {
+          _ <- checks
+          header <- req.headers
+            .get(`Content-Range`)
+            .liftTo[IO](new RuntimeException)
+          max <- header.range.second.liftTo[IO](new RuntimeException)
+        } yield {
+          (header.range.first, max)
+        }
 
-    ranges shouldBe (0 to ???).map { index =>
-      val chunkStart = index * ???
-      if (index < ???) {
-        (chunkStart, chunkStart + ???)
-      } else {
-        (chunkStart, chunkStart + ???)
+        Resource.liftF(getRange).map {
+          case (min, max) =>
+            ranges += (min -> max)
+
+            val lastRecordedByte = math.min(max, min + progressChunkSize - 1)
+            val done = lastRecordedByte == lastByte
+            Response[IO](
+              status = if (allBytes && done) Status.Ok else ResumeIncompleteStatus,
+              headers = Headers.of(Range(0, lastRecordedByte))
+            )
+        }
+      })
+
+      val actual = api
+        .uploadByteChunks(bucket, uploadToken, start, smallChunkSize, bytes)
+        .unsafeRunSync()
+      val expected = if (allBytes) Right(()) else Left(start + numBytes)
+
+      actual shouldBe expected
+      ranges shouldBe (start to lastByte by progressChunkSize.toLong).map { n =>
+        n -> math.min(lastByte, n + smallChunkSize - 1)
       }
     }
   }
 
-  it should "upload bytes to a resumable upload in multiple chunks, without finishing" in {
-    val ranges = new ArrayBuffer[(Long, Long)]()
+  it should behave like testUpload(
+    "upload bytes to a resumable upload in a single chunk",
+    allBytes = true
+  )
 
-    val api = new GcsApi(req => {
-      val checks = req.body.compile.toChunk.map { chunk =>
-        req.method shouldBe Method.PUT
-        req.uri shouldBe uploadURI
-        req.headers.toList should contain(
-          `Content-Length`.unsafeFromLong(chunk.size.toLong)
-        )
-      }
+  it should behave like testUpload(
+    "upload bytes to a resumable upload for a single chunk, without finishing",
+    allBytes = false
+  )
 
-      val getRange = for {
-        _ <- checks
-        header <- req.headers
-          .get(`Content-Range`)
-          .liftTo[IO](new RuntimeException)
-        max <- header.range.second.liftTo[IO](new RuntimeException)
-      } yield {
-        (header.range.first, max)
-      }
+  it should behave like testUpload(
+    "upload bytes to a resumable upload in multiple chunks",
+    allBytes = true,
+    numBytes = (smallChunkSize * 2.5).toInt
+  )
 
-      Resource.liftF(getRange).map {
-        case (min, max) =>
-          ranges += (min -> max)
+  it should behave like testUpload(
+    "upload bytes to a resumable upload in multiple chunks, without finishing",
+    allBytes = false,
+    numBytes = (smallChunkSize * 2.5).toInt
+  )
 
-          Response[IO](
-            status = ResumeIncompleteStatus,
-            headers = Headers.of(Range(0, max))
-          )
-      }
-    })
+  it should behave like testUpload(
+    "upload bytes to a resumable upload from an offset in the file",
+    allBytes = false,
+    start = 128L
+  )
 
-    api
-      .uploadBytes(
-        bucket,
-        uploadToken,
-        0,
-        ???
-      )
-      .unsafeRunSync() shouldBe Left(???)
+  it should behave like testUpload(
+    "resend bytes that aren't recorded by GCS, and emit the last uploaded position",
+    allBytes = false,
+    recordedRatio = 0.9
+  )
 
-    ranges shouldBe (0 to ???).map { index =>
-      val chunkStart = index * ???
-      if (index < ???) {
-        (chunkStart, chunkStart + ???)
-      } else {
-        (chunkStart, chunkStart + ???)
-      }
-    }
-  }
+  it should behave like testUpload(
+    "resend bytes that aren't recorded by GCS, finishing the upload",
+    allBytes = true,
+    recordedRatio = 0.35
+  )
 
-  it should "resend bytes that aren't recorded by GCS, and emit the last uploaded position" in {
-    val bytes = Stream.random[IO].take(100).map(_.toByte)
-    val ranges = new ArrayBuffer[(Long, Long)]()
-
-    val api = new GcsApi(req => {
-      val checks = req.body.compile.toChunk.map { chunk =>
-        req.method shouldBe Method.PUT
-        req.uri shouldBe uploadURI
-        req.headers.toList should contain(
-          `Content-Length`.unsafeFromLong(chunk.size.toLong)
-        )
-      }
-
-      val getRange = for {
-        _ <- checks
-        header <- req.headers
-          .get(`Content-Range`)
-          .liftTo[IO](new RuntimeException)
-        max <- header.range.second.liftTo[IO](new RuntimeException)
-      } yield {
-        (header.range.first, max)
-      }
-
-      Resource.liftF(getRange).map {
-        case (min, max) =>
-          ranges += (min -> max)
-
-          val recordedBytes = max * 9 / 10
-          val done = recordedBytes <= min
-          Response[IO](
-            status = ResumeIncompleteStatus,
-            headers = Headers.of(Range(0, if (done) max else recordedBytes))
-          )
-      }
-    })
-
-    api
-      .uploadBytes(bucket, uploadToken, 100, bytes)
-      .unsafeRunSync() shouldBe Left(200)
-
-    ranges shouldBe List(100 -> 199, 180 -> 199)
-  }
-
-  it should "resend bytes that aren't recorded by GCS, finishing the upload" in {
-    val bytes = Stream.random[IO].take(100).map(_.toByte)
-    val ranges = new ArrayBuffer[(Long, Long)]()
-
-    val api = new GcsApi(req => {
-      val checks = req.body.compile.toChunk.map { chunk =>
-        req.method shouldBe Method.PUT
-        req.uri shouldBe uploadURI
-        req.headers.toList should contain(
-          `Content-Length`.unsafeFromLong(chunk.size.toLong)
-        )
-      }
-
-      val getRange = for {
-        _ <- checks
-        header <- req.headers
-          .get(`Content-Range`)
-          .liftTo[IO](new RuntimeException)
-        max <- header.range.second.liftTo[IO](new RuntimeException)
-      } yield {
-        (header.range.first, max)
-      }
-
-      Resource.liftF(getRange).map {
-        case (min, max) =>
-          ranges += (min -> max)
-
-          val recordedBytes = max * 9 / 10
-          val done = recordedBytes <= min
-          Response[IO](
-            status = if (done) Status.Ok else ResumeIncompleteStatus,
-            headers = Headers.of(Range(0, if (done) max else recordedBytes))
-          )
-      }
-    })
-
-    api
-      .uploadBytes(bucket, uploadToken, 50, bytes)
-      .unsafeRunSync() shouldBe Right(())
-
-    ranges shouldBe List(
-      50 -> 99,
-      90 -> 139,
-      126 -> 149,
-      135 -> 149
-    )
-  }*/
+  it should behave like testUpload(
+    "upload bytes from an offset in the file, resending bytes that aren't recorded by GCS",
+    allBytes = true,
+    start = 128L,
+    recordedRatio = 0.5
+  )
 }
