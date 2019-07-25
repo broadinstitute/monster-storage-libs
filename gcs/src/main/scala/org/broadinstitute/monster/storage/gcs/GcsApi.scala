@@ -55,7 +55,13 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
   ): Stream[IO, Byte] =
     readObjectByChunks(bucket, path, fromByte, untilByte, ChunkSize, gunzipIfNeeded)
 
-  /** TODO */
+  /**
+   * Read a range of bytes (potentially the whole file) from an object in cloud storage.
+   *
+   * This is a helper method for the public-facing `readObject`, which allows for setting
+   * a custom chunk size. We expose it within the package so unit tests don't have to
+   * generate huge streams of test data.
+   */
   private[gcs] def readObjectByChunks(
     bucket: String,
     path: String,
@@ -304,7 +310,13 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
   ): IO[Either[Long, Unit]] =
     uploadByteChunks(bucket, uploadToken, rangeStart, ChunkSize, data)
 
-  /** TODO */
+  /**
+   * Write a stream of bytes (potentially the whole file) to a resumable upload in cloud storage.
+   *
+   * This is a helper method for the public-facing `uploadBytes`, which allows for setting
+   * a custom chunk size. We expose it within the package so unit tests don't have to
+   * generate huge streams of test data.
+   */
   private[gcs] def uploadByteChunks(
     bucket: String,
     uploadToken: String,
