@@ -1,11 +1,12 @@
 package org.broadinstitute.monster.storage.gcs
 
 import cats.effect.{IO, Resource}
+import org.apache.commons.codec.digest.DigestUtils
 //import cats.implicits._
 import fs2.Stream
 import org.http4s._
 import org.http4s.headers._
-//import org.http4s.multipart.Multipart
+import org.http4s.multipart.Multipart
 import org.scalatest.{EitherValues, FlatSpec, Matchers, OptionValues}
 
 //import scala.collection.mutable.ArrayBuffer
@@ -19,7 +20,6 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   private val path = "the/path"
   //private val uploadToken = "upload-token"
 
-  // numberOfChunks of the bodyText MUST BE SMALLER THAN bodyTextNumberOfBytes
   private def bodyText(n: Long): Stream[IO, Byte] =
     Stream
       .randomSeeded(n)[IO]
@@ -31,10 +31,11 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
 
   private val readObjectURI = baseGcsUri(bucket, path, "alt" -> "media")
   private val statObjectURI = baseGcsUri(bucket, path, "alt" -> "json")
+  private val createObjectURI = baseGcsUploadUri(bucket, "multipart")
+
   /*private val initResumableUploadURI = baseGcsUploadUri(bucket, "resumable")
   private val uploadURI =
-    baseGcsUploadUri(bucket, "resumable").withQueryParam("upload_id", uploadToken)
-  private val createObjectURI = baseGcsUploadUri(bucket, "multipart")*/
+    baseGcsUploadUri(bucket, "resumable").withQueryParam("upload_id", uploadToken)*/
 
   private val acceptEncodingHeader = Header("Accept-Encoding", "identity, gzip")
 
@@ -244,68 +245,75 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       .statObject(bucket, path)
       .unsafeRunSync() shouldBe (true -> Some(theMd5))
   }
-  /*
+
   // createObject
-  def testCreateObject(expectedMd5: Option[String]): Unit = {
-    val description = if (expectedMd5.isDefined) {
-      "include expected md5s in multipart upload requests"
-    } else {
-      "create a GCS object using a multipart upload"
-    }
-
+  def testCreateObject(description: String, includeMd5: Boolean): Unit = {
     it should description in {
-      val api = new GcsApi(req => {
-        req.method shouldBe Method.POST
-        req.uri shouldBe createObjectURI
-        req.contentType.value.mediaType.isMultipart shouldBe true
+      val baseBytes = bodyText(smallChunkSize.toLong * 16)
 
-        val dataChecks = req.as[Multipart[IO]].flatMap {
-          multipart =>
-            multipart.parts.size shouldBe 2
-            val metadataPart = multipart.parts(0)
-            val dataPart = multipart.parts(1)
+      val doChecks = for {
+        stringBody <- stringify(baseBytes)
+        md5 = if (includeMd5) Some(DigestUtils.md5Hex(stringBody)) else None
+        api = new GcsApi(req => {
+          req.method shouldBe Method.POST
+          req.uri shouldBe createObjectURI
+          req.contentType.value.mediaType.isMultipart shouldBe true
 
-            metadataPart.headers
-              .get(`Content-Type`)
-              .value
-              .mediaType shouldBe MediaType.application.json
-            dataPart.headers
-              .get(`Content-Type`)
-              .value shouldBe `Content-Type`(MediaType.`text/event-stream`)
+          val dataChecks = req.as[Multipart[IO]].flatMap {
+            multipart =>
+              multipart.parts.size shouldBe 2
+              val metadataPart = multipart.parts(0)
+              val dataPart = multipart.parts(1)
 
-            metadataPart.body.compile.toChunk.flatMap { metadataBytes =>
-              io.circe.parser
-                .parse(new String(metadataBytes.toArray[Byte]))
-                .right
-                .value shouldBe GcsApi.buildUploadMetadata(path, expectedMd5)
+              metadataPart.headers
+                .get(`Content-Type`)
+                .value
+                .mediaType shouldBe MediaType.application.json
+              dataPart.headers
+                .get(`Content-Type`)
+                .value shouldBe `Content-Type`(MediaType.`text/event-stream`)
 
-              dataPart.body.compile.toChunk.map { dataBytes =>
-                new String(dataBytes.toArray[Byte]) shouldBe ???
+              metadataPart.body.compile.toChunk.flatMap { metadataBytes =>
+                io.circe.parser
+                  .parse(new String(metadataBytes.toArray[Byte]))
+                  .right
+                  .value shouldBe buildUploadMetadata(path, md5)
+
+                dataPart.body.compile.toChunk.map { dataBytes =>
+                  new String(dataBytes.toArray[Byte]) shouldBe stringBody
+                }
               }
-            }
-        }
+          }
 
-        Resource.liftF(dataChecks).map { _ =>
-          Response[IO](status = Status.Ok)
-        }
-      })
+          Resource.liftF(dataChecks).map { _ =>
+            Response[IO](status = Status.Ok)
+          }
+        })
+        _ <- api
+          .createObject(
+            bucket,
+            path,
+            `Content-Type`(MediaType.`text/event-stream`),
+            md5,
+            baseBytes
+          )
+      } yield ()
 
-      api
-        .createObject(
-          bucket,
-          path,
-          `Content-Type`(MediaType.`text/event-stream`),
-          expectedMd5,
-          ???
-        )
-        .unsafeRunSync()
+      doChecks.unsafeRunSync()
     }
   }
 
-  it should behave like testCreateObject(None)
-  it should behave like testCreateObject(Some(???))
+  it should behave like testCreateObject(
+    "create a GCS object using a multipart upload",
+    includeMd5 = false
+  )
+  it should behave like testCreateObject(
+    "include expected md5s in multipart upload requests",
+    includeMd5 = true
+  )
 
   // deleteObject
+  /*
   it should "delete a GCS object" in {
     val api = new GcsApi(req => {
       req.method shouldBe Method.DELETE
