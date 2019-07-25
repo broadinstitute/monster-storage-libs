@@ -14,11 +14,19 @@ import org.scalatest.{EitherValues, FlatSpec, Matchers, OptionValues}
 class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherValues {
   import GcsApi._
 
-  private val smallChunkSize = 16
-
   private val bucket = "bucket"
   private val path = "the/path"
-  //private val uploadToken = "upload-token"
+  private val uploadToken = "upload-token"
+  private val smallChunkSize = 16
+
+  private val readObjectURI = baseGcsUri(bucket, path, "alt" -> "media")
+  private val statObjectURI = baseGcsUri(bucket, path, "alt" -> "json")
+  private val createObjectURI = baseGcsUploadUri(bucket, "multipart")
+  private val initResumableUploadURI = baseGcsUploadUri(bucket, "resumable")
+  /*private val uploadURI =
+    baseGcsUploadUri(bucket, "resumable").withQueryParam("upload_id", uploadToken)*/
+
+  private val acceptEncodingHeader = Header("Accept-Encoding", "identity, gzip")
 
   private def bodyText(n: Long): Stream[IO, Byte] =
     Stream
@@ -28,16 +36,6 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       .flatMap(s => Stream.emits(s.getBytes))
   private def stringify(bytes: Stream[IO, Byte]): IO[String] =
     bytes.through(fs2.text.utf8Decode).compile.toChunk.map(_.toArray[String].mkString(""))
-
-  private val readObjectURI = baseGcsUri(bucket, path, "alt" -> "media")
-  private val statObjectURI = baseGcsUri(bucket, path, "alt" -> "json")
-  private val createObjectURI = baseGcsUploadUri(bucket, "multipart")
-
-  /*private val initResumableUploadURI = baseGcsUploadUri(bucket, "resumable")
-  private val uploadURI =
-    baseGcsUploadUri(bucket, "resumable").withQueryParam("upload_id", uploadToken)*/
-
-  private val acceptEncodingHeader = Header("Accept-Encoding", "identity, gzip")
 
   behavior of "GcsApi"
 
@@ -335,88 +333,63 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     exists = false
   )
 
-  /*
   // initResumableUpload
-  it should "initialize a resumable upload" in {
-    val api = new GcsApi(req => {
-      val checks = req.body.compile.toChunk.map {
-        bodyChunk =>
-          req.method shouldBe Method.POST
-          req.uri shouldBe initResumableUploadURI
-          req.headers.toList should contain theSameElementsAs List(
-            `Content-Length`.unsafeFromLong(bodyChunk.size.toLong),
-            `Content-Type`(MediaType.application.json, Charset.`UTF-8`),
-            Header(GcsApi.UploadContentLengthHeader, ???),
-            Header(GcsApi.UploadContentTypeHeader, "text/event-stream")
-          )
+  def testInitUpload(description: String, withMd5: Boolean): Unit = {
+    it should description in {
+      val expectedSize = 10L
+      val expectedMd5 = if (withMd5) Some("abcdef") else None
 
-          io.circe.parser
-            .parse(new String(bodyChunk.toArray[Byte]))
-            .right
-            .value shouldBe GcsApi.buildUploadMetadata(path, None)
-      }
+      val api = new GcsApi(req => {
+        val checks = req.body.compile.toChunk.map {
+          bodyChunk =>
+            req.method shouldBe Method.POST
+            req.uri shouldBe initResumableUploadURI
+            req.headers.toList should contain theSameElementsAs List(
+              `Content-Length`.unsafeFromLong(bodyChunk.size.toLong),
+              `Content-Type`(MediaType.application.json, Charset.`UTF-8`),
+              Header(GcsApi.UploadContentLengthHeader, expectedSize.toString),
+              Header(GcsApi.UploadContentTypeHeader, "text/event-stream")
+            )
 
-      Resource.liftF(checks).map { _ =>
-        Response[IO](
-          status = Status.Ok,
-          headers = Headers.of(
-            Header(GcsApi.UploadIDHeader, uploadToken)
+            io.circe.parser
+              .parse(new String(bodyChunk.toArray[Byte]))
+              .right
+              .value shouldBe GcsApi.buildUploadMetadata(path, expectedMd5)
+        }
+
+        Resource.liftF(checks).map { _ =>
+          Response[IO](
+            status = Status.Ok,
+            headers = Headers.of(
+              Header(GcsApi.UploadIDHeader, uploadToken)
+            )
           )
+        }
+      })
+
+      api
+        .initResumableUpload(
+          bucket,
+          path,
+          `Content-Type`(MediaType.`text/event-stream`),
+          expectedSize,
+          expectedMd5
         )
-      }
-    })
-
-    api
-      .initResumableUpload(
-        bucket,
-        path,
-        `Content-Type`(MediaType.`text/event-stream`),
-        ???,
-        None
-      )
-      .unsafeRunSync() shouldBe uploadToken
+        .unsafeRunSync() shouldBe uploadToken
+    }
   }
 
-  it should "initialize a resumable upload with an expected md5" in {
-    val api = new GcsApi(req => {
-      val checks = req.body.compile.toChunk.map {
-        bodyChunk =>
-          req.method shouldBe Method.POST
-          req.uri shouldBe initResumableUploadURI
-          req.headers.toList should contain theSameElementsAs List(
-            `Content-Length`.unsafeFromLong(bodyChunk.size.toLong),
-            `Content-Type`(MediaType.application.json, Charset.`UTF-8`),
-            Header(GcsApi.UploadContentLengthHeader, ???),
-            Header(GcsApi.UploadContentTypeHeader, "text/event-stream")
-          )
+  it should behave like testInitUpload(
+    "initialize a resumable upload with no md5",
+    withMd5 = false
+  )
 
-          io.circe.parser
-            .parse(new String(bodyChunk.toArray[Byte]))
-            .right
-            .value shouldBe GcsApi.buildUploadMetadata(path, Some(???))
-      }
+  it should behave like testInitUpload(
+    "initialize a resumable upload with an md5",
+    withMd5 = true
+  )
 
-      Resource.liftF(checks).map { _ =>
-        Response[IO](
-          status = Status.Ok,
-          headers = Headers.of(
-            Header(GcsApi.UploadIDHeader, uploadToken)
-          )
-        )
-      }
-    })
-
-    api
-      .initResumableUpload(
-        bucket,
-        path,
-        `Content-Type`(MediaType.`text/event-stream`),
-        ???,
-        Some(???)
-      )
-      .unsafeRunSync() shouldBe uploadToken
-  }
-
+  /*
   // uploadBytes
   it should "upload bytes to a resumable upload in a single chunk" in {
     val api = new GcsApi(req => {
