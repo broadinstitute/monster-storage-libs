@@ -168,7 +168,6 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
       }
     }
 
-
   // TODO: if the data is greater than n bytes use initResumableUpload and the uploadBytes in multiple chunks
   /**
     * Create a new object in GCS using a multipart upload.
