@@ -67,7 +67,7 @@ pipeline {
                         'export VAULT_TOKEN=$(cat $VAULT_TOKEN_PATH)',
                         "CODECOV_TOKEN=\$(vault read -field=token $vaultPath)",
                         'sbt coverageAggregate',
-                        'bash <(curl -s https://codecov.io/bash) -t ${CODECOV_TOKEN}'
+                        'bash <(curl -s https://codecov.io/bash) -v -d -t ${CODECOV_TOKEN}'
                 ]
                 sh parts.join('\n')
             }
