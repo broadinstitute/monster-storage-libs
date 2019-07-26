@@ -74,7 +74,7 @@ pipeline {
                         'export VAULT_TOKEN=$(cat $VAULT_TOKEN_PATH)',
                         "CODECOV_TOKEN=\$(vault read -field=token $vaultPath)",
                         'sbt coverageAggregate',
-                        "if [ -z '${env.CHANGE_ID}' ]; then ${codecov} -B ${env.BRANCH_NAME}; else ${codecov} -P ${env.CHANGE_ID} fi"
+                        "if [ -z '${env.CHANGE_ID}' ]; then ${codecov} -B ${env.BRANCH_NAME}; else ${codecov} -P ${env.CHANGE_ID}; fi"
                 ]
                 sh parts.join('\n')
             }
