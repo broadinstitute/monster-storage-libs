@@ -60,6 +60,13 @@ pipeline {
         success {
             script {
                 def vaultPath = 'secret/dsde/monster/dev/codecov/monster-storage-libs'
+                def codecov = [
+                        'bash <(curl -s https://codecov.io/bash)',
+                        '-v',
+                        '-t ${CODECOV_TOKEN}',
+                        '-C $(git rev-parse HEAD)',
+                        "-b ${env.BUILD_NUMBER}"
+                ].join(' ')
                 def parts = [
                         '#!/bin/bash',
                         'set +x',
@@ -67,7 +74,7 @@ pipeline {
                         'export VAULT_TOKEN=$(cat $VAULT_TOKEN_PATH)',
                         "CODECOV_TOKEN=\$(vault read -field=token $vaultPath)",
                         'sbt coverageAggregate',
-                        'bash <(curl -s https://codecov.io/bash) -v -d -t ${CODECOV_TOKEN}'
+                        "if [ -z '${env.CHANGE_ID}' ]; then ${codecov} -B ${env.BRANCH_NAME}; else ${codecov} -P ${env.CHANGE_ID} fi"
                 ]
                 sh parts.join('\n')
             }
