@@ -61,9 +61,10 @@ pipeline {
             script {
                 def vaultPath = 'secret/dsde/monster/dev/codecov/monster-storage-libs'
                 def codecov = [
-                        'bash <(curl -s https://codecov.io/bash)',
+                        '1>&2 bash <(curl -s https://codecov.io/bash)',
                         '-v',
                         '-t ${CODECOV_TOKEN}',
+                        "-s ${env.WORKSPACE}/target",
                         '-C $(git rev-parse HEAD)',
                         "-b ${env.BUILD_NUMBER}"
                 ].join(' ')
