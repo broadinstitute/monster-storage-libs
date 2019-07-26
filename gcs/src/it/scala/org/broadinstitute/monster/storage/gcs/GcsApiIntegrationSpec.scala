@@ -34,7 +34,7 @@ class GcsApiIntegrationSpec
    * NOTE: This is lorem ipsum because it needs to be large enough to meaningfully test
    * GCS's range downloads, and I was too lazy to come up with my own paragraph of text.
    */
-  private val bodyText = Random.alphanumeric.take(1024 * 256 * 2).mkString
+  private val bodyText = Random.alphanumeric.take((2.5 * GcsApi.ChunkSize).toInt).mkString
 
   private val bodyMd5 = DigestUtils.md5Hex(bodyText)
 
@@ -142,7 +142,7 @@ class GcsApiIntegrationSpec
         buildString {
           api
             .readObject(blob.getBucket, blob.getName)
-            .through(fs2.compress.gunzip(1024 * 1024))
+            .through(fs2.compress.gunzip(GcsApi.ChunkSize))
         }
       }
     }.unsafeRunSync() shouldBe bodyText
@@ -185,7 +185,7 @@ class GcsApiIntegrationSpec
 
     val expected = Stream
       .emits(bodyText.getBytes)
-      .through(fs2.compress.gzip(1024 * 1024))
+      .through(fs2.compress.gzip(GcsApi.ChunkSize))
       .drop(10)
       .compile
       .toVector
@@ -215,7 +215,7 @@ class GcsApiIntegrationSpec
 
     val expected = Stream
       .emits(bodyText.getBytes)
-      .through(fs2.compress.gzip(1024 * 1024))
+      .through(fs2.compress.gzip(GcsApi.ChunkSize))
       .take(10)
       .compile
       .toVector
@@ -347,7 +347,7 @@ class GcsApiIntegrationSpec
     gcsExists(BlobId.of(bucket, path)) shouldBe false
   }
 
-  it should "should check if a GCS object exists and return true with a Md5 " in {
+  it should "should check if a GCS object exists and return true with an md5" in {
     val objectExists = writeGzippedTestFile.use { blob =>
       withClient { api =>
         api.statObject(blob.getBucket, blob.getName).map {
@@ -381,101 +381,96 @@ class GcsApiIntegrationSpec
   it should "upload files using resumable uploads" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
 
-    writeGzippedTestFile.use { blob =>
-      withClient { api =>
-        api
+    withClient { api =>
+      for {
+        uploadToken <- api
           .initResumableUpload(
-            blob.getBucket,
+            bucket,
             path,
             textPlain,
             bodyText.getBytes().length.toLong,
             Some(bodyMd5)
           )
-          .flatMap { uploadToken =>
-            api.uploadBytes(
-              blob.getBucket,
-              uploadToken,
-              0,
-              Stream.emits(bodyText.getBytes.toSeq).covary[IO]
-            )
-          }
-      }.bracket { _ =>
-        IO.delay {
-          gcsExists(BlobId.of(blob.getBucket, path)) shouldBe true
-          gcsClient.get(blob).getContent() shouldBe bodyText.getBytes
-        }
-      } { _ =>
-        IO.delay(gcsClient.delete(blob.getBucket, path)).as(())
+        output <- api.uploadBytes(
+          bucket,
+          uploadToken,
+          0,
+          Stream.emits(bodyText.getBytes).covary[IO]
+        )
+      } yield {
+        output
       }
+    }.bracket { output =>
+      IO.delay {
+        output.isRight shouldBe true
+        val blobId = BlobId.of(bucket, path)
+        gcsExists(blobId) shouldBe true
+        gcsClient.get(blobId).getContent() shouldBe bodyText.getBytes
+      }
+    } { _ =>
+      IO.delay(gcsClient.delete(bucket, path)).as(())
     }.unsafeRunSync()
   }
 
   it should "upload files using resumable uploads over multiple upload calls" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
     val bodySize = bodyText.getBytes().length
-    val bytesPerUpload = bodySize / 2
 
-    writeGzippedTestFile.use { blob =>
-      withClient { api =>
-        for {
-          uploadToken <- api
-            .initResumableUpload(
-              blob.getBucket,
-              path,
-              textPlain,
-              bodySize.toLong,
-              Some(bodyMd5)
-            )
-           bytesUploaded <- api
-             .uploadBytes(
-               blob.getBucket,
-               uploadToken,
-               0,
-               Stream.emits(bodyText.getBytes.take(bytesPerUpload)).covary[IO],
-               bytesPerUpload
-             )
-            numUploaded = bytesUploaded.left.value
-           finalOutput <- api.uploadBytes(
-             blob.getBucket,
-             uploadToken,
-             numUploaded,
-             Stream
-               .emits(bodyText.getBytes.drop(numUploaded.toInt))
-               .covary[IO]
-           )
-        } yield {
-          (bytesUploaded.left.value <= bytesPerUpload.toLong) shouldBe true
-          finalOutput
-        }
-
-      }.bracket { _ =>
-        IO.delay {
-          gcsExists(BlobId.of(blob.getBucket, path)) shouldBe true
-          gcsClient.get(blob).getContent() shouldBe bodyText.getBytes
-        }
-      } { _ =>
-        IO.delay(gcsClient.delete(blob.getBucket, path)).as(())
+    withClient { api =>
+      for {
+        uploadToken <- api
+          .initResumableUpload(
+            bucket,
+            path,
+            textPlain,
+            bodySize.toLong,
+            Some(bodyMd5)
+          )
+        bytesUploaded <- api
+          .uploadBytes(
+            bucket,
+            uploadToken,
+            0,
+            Stream.emits(bodyText.getBytes.take(GcsApi.ChunkSize)).covary[IO]
+          )
+        numUploaded = bytesUploaded.left.value
+        finalOutput <- api.uploadBytes(
+          bucket,
+          uploadToken,
+          numUploaded,
+          Stream
+            .emits(bodyText.getBytes.drop(numUploaded.toInt))
+            .covary[IO]
+        )
+      } yield {
+        bytesUploaded.left.value should be <= GcsApi.ChunkSize.toLong
+        finalOutput
       }
+    }.bracket { output =>
+      IO.delay {
+        output.isRight shouldBe true
+        val blobId = BlobId.of(bucket, path)
+        gcsExists(blobId) shouldBe true
+        gcsClient.get(blobId).getContent() shouldBe bodyText.getBytes
+      }
+    } { _ =>
+      IO.delay(gcsClient.delete(bucket, path)).as(())
     }.unsafeRunSync()
   }
 
   it should "report failure if attempting to upload to an uninitialized ID" in {
-    val tryInitAndUpload = writeGzippedTestFile.use { blob =>
-      withClient { api =>
-        api.uploadBytes(
-          blob.getBucket,
-          "bad-upload-token-plus-kobe",
-          0,
-          Stream.emits(bodyText.getBytes.toSeq).covary[IO]
-        )
-      }
+    val tryInitAndUpload = withClient { api =>
+      api.uploadBytes(
+        bucket,
+        "bad-upload-token-plus-kobe",
+        0,
+        Stream.emits(bodyText.getBytes).covary[IO]
+      )
     }
 
-    tryInitAndUpload.recover {
-      case GcsApi.GcsFailure(status, _, _) =>
-        status shouldBe Status.NotFound
-        Right(())
-    }.unsafeRunSync()
+    tryInitAndUpload.attempt.unsafeRunSync().left.value should matchPattern {
+      case GcsApi.GcsFailure(status, _, _) if status == Status.NotFound => ()
+    }
   }
 
   it should "report failure if data uploaded in a resumable upload doesn't match the expected md5" in {
@@ -484,23 +479,26 @@ class GcsApiIntegrationSpec
     val badTextSize = badText.getBytes().length
 
     val tryUpload = withClient { api =>
-      api
-        .initResumableUpload(bucket, path, textPlain, badTextSize.toLong, Some(bodyMd5))
-        .flatMap { uploadToken =>
-          api.uploadBytes(
-            bucket,
-            uploadToken,
-            0,
-            Stream.emits(badText.getBytes.toSeq).covary[IO]
-          )
-        }
+      for {
+        uploadToken <- api.initResumableUpload(
+          bucket,
+          path,
+          textPlain,
+          badTextSize.toLong,
+          Some(bodyMd5)
+        )
+        _ <- api.uploadBytes(
+          bucket,
+          uploadToken,
+          0,
+          Stream.emits(badText.getBytes).covary[IO]
+        )
+      } yield ()
     }
 
-    tryUpload.recover {
-      case GcsApi.GcsFailure(status, _, _) =>
-        status shouldBe Status.BadRequest
-        Right(())
-    }.unsafeRunSync()
+    tryUpload.attempt.unsafeRunSync().left.value should matchPattern {
+      case GcsApi.GcsFailure(status, _, _) if status == Status.BadRequest => ()
+    }
 
     gcsExists(BlobId.of(bucket, path)) shouldBe false
   }
