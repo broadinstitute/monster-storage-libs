@@ -347,7 +347,7 @@ class GcsApiIntegrationSpec
     gcsExists(BlobId.of(bucket, path)) shouldBe false
   }
 
-  it should "should check if a GCS object exists and return true with an md5" in {
+  it should "check if a GCS object exists and return true with an md5" in {
     val objectExists = writeGzippedTestFile.use { blob =>
       withClient { api =>
         api.statObject(blob.getBucket, blob.getName).map {
@@ -362,7 +362,7 @@ class GcsApiIntegrationSpec
     objectExists.unsafeRunSync() shouldBe true
   }
 
-  it should "should check if a GCS object exists and return false" in {
+  it should "check if a GCS object exists and return false" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
 
     val objectExists = writeGzippedTestFile.use { blob =>
