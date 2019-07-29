@@ -29,6 +29,13 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
   private val applicationJsonContentType =
     `Content-Type`(MediaType.application.json, Charset.`UTF-8`)
 
+  private def getObjectMetadata(
+    bucket: String,
+    path: String
+  ): Resource[IO, Response[IO]] = runHttp {
+    Request[IO](method = Method.GET, uri = baseGcsUri(bucket, path, "alt" -> "json"))
+  }
+
   /**
     * Read a range of bytes (potentially the whole file) from an object in cloud storage.
     *
@@ -45,49 +52,92 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     fromByte: Long = 0L,
     untilByte: Option[Long] = None,
     gunzipIfNeeded: Boolean = false
+  ): Stream[IO, Byte] =
+    readObjectByChunks(bucket, path, fromByte, untilByte, ChunkSize, gunzipIfNeeded)
+
+  /**
+    * Read a range of bytes (potentially the whole file) from an object in cloud storage.
+    *
+    * This is a helper method for the public-facing `readObject`, which allows for setting
+    * a custom chunk size. We expose it within the package so unit tests don't have to
+    * generate huge streams of test data.
+    */
+  private[gcs] def readObjectByChunks(
+    bucket: String,
+    path: String,
+    fromByte: Long,
+    untilByte: Option[Long],
+    chunkSize: Int,
+    gunzipIfNeeded: Boolean
   ): Stream[IO, Byte] = {
-    val objectUri = baseGcsUri(bucket, path).withQueryParam("alt", "media")
-    /*
-     * NOTE: We don't use http4s' `Range` type for this header because when it
-     * renders ranges without an endpoint it omits the trailing '-'. The HTTP
-     * spec seems to say that both forms are equivalent, but GCS only recognizes
-     * the form with the trailing '-'.
-     *
-     * TODO: Instead of a one-shot request for all the bytes, we can be more
-     * sophisticated and send a sequence of requests with a constant range size
-     * that we believe is much less likely to flap from transient problems.
-     *
-     * gsutil uses an approach where they repeatedly try to request all the bytes,
-     * and when requests fail they see how much data has actually been transferred
-     * and retry from that point.
-     */
-    val range =
-      Header("Range", s"bytes=$fromByte-${untilByte.fold("")(b => (b - 1).toString)}")
+    val objectUri = baseGcsUri(bucket, path, "alt" -> "media")
 
-    // Tell GCS that we're OK accepting gzipped data to prevent it from trying to
-    // decompress on the server-side, because that breaks use of the 'Range' header.
-    val accept =
-      `Accept-Encoding`(NonEmptyList.of(ContentCoding.identity, ContentCoding.gzip))
+    def pullBytes(startByte: Long, endByte: Long): Stream[IO, Byte] = {
+      val finalRequest = endByte - startByte - 1 <= chunkSize
+      val rangeEnd = if (finalRequest) endByte else startByte + chunkSize
+      val range = Range(startByte, rangeEnd - 1)
+      // Tell GCS that we're OK accepting gzipped data to prevent it from trying to
+      // decompress on the server-side, because that breaks use of the 'Range' header.
+      val accept =
+        `Accept-Encoding`(NonEmptyList.of(ContentCoding.identity, ContentCoding.gzip))
 
-    val request = Request[IO](
-      method = Method.GET,
-      uri = objectUri,
-      headers = Headers.of(range, accept)
-    )
+      val request = Request[IO](
+        method = Method.GET,
+        uri = objectUri,
+        headers = Headers.of(range, accept)
+      )
 
-    Stream.resource(runHttp(request)).flatMap { response =>
-      if (response.status.isSuccess && gunzipIfNeeded) {
-        response.headers.get(`Content-Encoding`) match {
-          case Some(header)
-              if header.contentCoding == ContentCoding.gzip || header.contentCoding == ContentCoding.`x-gzip` =>
-            response.body.through(fs2.compress.gunzip(GunzipBufferSize))
-          case _ => response.body
+      val responseStream = Stream.resource(runHttp(request)).flatMap { response =>
+        if (response.status.isSuccess) {
+          response.body
+        } else {
+          Stream.eval(
+            reportError(response, s"Failed to get object bytes from $path in $bucket")
+          )
         }
-      } else if (response.status.isSuccess) {
-        response.body
-      } else {
-        Stream.eval(reportError(response, "Failed to get object bytes"))
       }
+
+      if (finalRequest) {
+        responseStream
+      } else {
+        responseStream.append(pullBytes(rangeEnd, endByte))
+      }
+    }
+
+    val getObjectInfo = getObjectMetadata(bucket, path).use { response =>
+      if (response.status.isSuccess) {
+        for {
+          byteChunk <- response.body.compile.toChunk
+          objectMetadata <- parser
+            .parseByteBuffer(byteChunk.toByteBuffer)
+            .flatMap(_.as[Json])
+            .liftTo[IO]
+          objectSize <- objectMetadata.hcursor.get[Long](ObjectSizeKey).liftTo[IO]
+        } yield {
+          val maybeEncoding = for {
+            rawEncoding <- objectMetadata.hcursor.get[String](ObjectEncodingKey)
+            parsedEncoding <- ContentCoding.fromString(rawEncoding)
+          } yield {
+            parsedEncoding
+          }
+
+          (objectSize, maybeEncoding.toOption)
+        }
+      } else {
+        reportError(response, s"Failed to get object metadata from $path in $bucket")
+      }
+    }
+
+    Stream.eval(getObjectInfo).flatMap {
+      case (objectSize, encoding) =>
+        val endByte = untilByte.getOrElse(objectSize)
+        val rawBytes = pullBytes(fromByte, endByte)
+
+        if (gunzipIfNeeded && encoding.contains(ContentCoding.gzip)) {
+          rawBytes.through(fs2.compress.gunzip(chunkSize))
+        } else {
+          rawBytes
+        }
     }
   }
 
@@ -99,11 +149,8 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     * @return a boolean indicating if an object exists at `path` in `bucket`, and the
     *         md5 of the object if Google calculated one during the upload
     */
-  def statObject(bucket: String, path: String): IO[(Boolean, Option[String])] = {
-    val gcsUri = baseGcsUri(bucket, path).copy(query = Query.fromPairs("alt" -> "json"))
-    val gcsReq = Request[IO](method = Method.GET, uri = gcsUri)
-
-    runHttp(gcsReq).use { response =>
+  def statObject(bucket: String, path: String): IO[(Boolean, Option[String])] =
+    getObjectMetadata(bucket, path).use { response =>
       if (response.status == Status.NotFound) {
         IO.pure((false, None))
       } else if (response.status.isSuccess) {
@@ -117,33 +164,11 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
           (true, objectMetadata(ObjectMd5Key).flatMap(_.asString))
         }
       } else {
-        reportError(response, s"Request for metadata from $gcsUri failed")
+        reportError(response, s"Failed to get object metadata from $path in $bucket")
       }
     }
-  }
 
-  /**
-    * Build object metadata to include in upload requests to GCS.
-    *
-    * @param path the path of the object that will be uploaded, relative to its
-    *             enclosing bucket
-    * @param expectedMd5 an optional md5 which the object's contents should match
-    *                    after the upload completes. Triggers server-side content
-    *                    validation if included in the upload request
-    */
-  private def buildUploadMetadata(path: String, expectedMd5: Option[String]): Json = {
-    // Object metadata is used by Google to register the upload to the correct pseudo-path.
-    val baseObjectMetadata = JsonObject("name" -> path.asJson)
-    expectedMd5
-      .fold(baseObjectMetadata) { hexMd5 =>
-        baseObjectMetadata.add(
-          ObjectMd5Key,
-          Base64.encodeBase64String(Hex.decodeHex(hexMd5.toCharArray)).asJson
-        )
-      }
-      .asJson
-  }
-
+  // TODO: if the data is greater than n bytes use initResumableUpload and the uploadBytes in multiple chunks
   /**
     * Create a new object in GCS using a multipart upload.
     *
@@ -169,24 +194,26 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     val multipartBoundary = Boundary.create
     val objectMetadata = buildUploadMetadata(path, expectedMd5)
 
-    val dataHeader =
-      s"""--${multipartBoundary.value}
-         |${applicationJsonContentType.renderString}
-         |
-         |${objectMetadata.noSpaces}
-         |
-         |--${multipartBoundary.value}
-         |${contentType.renderString}
-         |""".stripMargin.getBytes
+    val delimiter = s"--${multipartBoundary.value}"
+    val end = s"$delimiter--"
 
-    val dataFooter =
-      s"""
-         |--${multipartBoundary.value}--""".stripMargin.getBytes
+    val dataHeader = List(
+      delimiter,
+      applicationJsonContentType.renderString,
+      "",
+      objectMetadata.noSpaces,
+      "",
+      delimiter,
+      contentType.renderString,
+      ""
+    ).mkString("", Boundary.CRLF, Boundary.CRLF)
+
+    val dataFooter = List("", end).mkString(Boundary.CRLF)
 
     val fullBody = Stream
-      .emits(dataHeader)
+      .emits(dataHeader.getBytes)
       .append(data)
-      .append(Stream.emits(dataFooter))
+      .append(Stream.emits(dataFooter.getBytes))
 
     fullBody.compile.toChunk.flatMap { chunk =>
       val fullHeaders = Headers.of(
@@ -280,15 +307,30 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     bucket: String,
     uploadToken: String,
     rangeStart: Long,
-    data: Stream[IO, Byte],
-    bytesPerUploadRequest: Int = MaxBytesPerUploadRequest
+    data: Stream[IO, Byte]
+  ): IO[Either[Long, Unit]] =
+    uploadByteChunks(bucket, uploadToken, rangeStart, ChunkSize, data)
+
+  /**
+    * Write a stream of bytes (potentially the whole file) to a resumable upload in cloud storage.
+    *
+    * This is a helper method for the public-facing `uploadBytes`, which allows for setting
+    * a custom chunk size. We expose it within the package so unit tests don't have to
+    * generate huge streams of test data.
+    */
+  private[gcs] def uploadByteChunks(
+    bucket: String,
+    uploadToken: String,
+    rangeStart: Long,
+    chunkSize: Int,
+    data: Stream[IO, Byte]
   ): IO[Either[Long, Unit]] = {
 
     // Helper method to incrementally push data from the input stream to GCS.
     def pushChunks(start: Long, data: Stream[IO, Byte]): Pull[IO, Nothing, Option[Long]] =
       // Pull the first chunk of data off the front of the stream.
       data.pull
-        .unconsN(bytesPerUploadRequest, allowFewer = true)
+        .unconsN(chunkSize, allowFewer = true)
         .flatMap {
           // If the stream was empty, mark that we haven't made any progress
           // from the initial byte.
@@ -356,20 +398,19 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
   }
 
   /**
-    * Delete an object in GCS.
-    *
-    * TODO: Make this succeed if the object is already deleted, if possible.
+    * Delete an object in GCS if exists.
     *
     * @param bucket name of the bucket containing the object to delete
     * @param path path within `bucket` pointing to the object to delete
+    * @return true if an object was actually deleted, otherwise false
     */
-  def deleteObject(bucket: String, path: String): IO[Unit] = {
+  def deleteObject(bucket: String, path: String): IO[Boolean] = {
     val gcsUri = baseGcsUri(bucket, path)
     val gcsReq = Request[IO](method = Method.DELETE, uri = gcsUri)
 
     runHttp(gcsReq).use { response =>
-      if (response.status.isSuccess) {
-        IO.unit
+      if (response.status.isSuccess || response.status == Status.NotFound) {
+        IO.pure(response.status.isSuccess)
       } else {
         reportError(response, s"Failed to delete object $path in $bucket")
       }
@@ -443,20 +484,32 @@ object GcsApi {
     }
 
   /** Build the JSON API endpoint for an existing bucket/path in GCS. */
-  def baseGcsUri(bucket: String, path: String): Uri = {
+  def baseGcsUri(bucket: String, path: String, queryParams: (String, String)*): Uri = {
     // NOTE: Calls to the `/` method cause the RHS to be URL-encoded.
     // This is the correct behavior in this case, but it can cause confusion.
-    uri"https://www.googleapis.com/storage/v1/b/" / bucket / "o" / path
+    val uri = uri"https://www.googleapis.com/storage/v1/b/" / bucket / "o" / path
+    uri.copy(query = Query.fromPairs(queryParams: _*))
   }
 
   /** Build the JSON API endpoint for an upload to a GCS bucket. */
   def baseGcsUploadUri(bucket: String, uploadType: String): Uri = {
     val uri = uri"https://www.googleapis.com/upload/storage/v1/b" / bucket / "o"
-    uri.copy(query = Query.fromPairs("uploadType" -> uploadType))
+    uri.withQueryParam("uploadType", uploadType)
   }
 
-  private val bytesPerKib = 1024
-  private val bytesPerMib = 1024 * bytesPerKib
+  private[gcs] val bytesPerKib = 1024
+  private[gcs] val bytesPerMib = 1024 * bytesPerKib
+
+  /**
+    * Number of bytes to pull / write from GCS at a time.
+    *
+    * Google doesn't recommend a particular size for pulling data, but
+    * it does say upload chunks should be in multiples of 256KB. We've
+    * seen repeated pulls for chunk sizes that are "too small" cause
+    * hangs on the Google end too, so fixing a big enough default
+    * seems reasonable.
+    */
+  val ChunkSize: Int = 256 * bytesPerKib
 
   /**
     * Max number of bytes to send in a single request to GCS.
@@ -465,18 +518,6 @@ object GcsApi {
     * to a resumable upload.
     */
   val MaxBytesPerUploadRequest: Int = 5 * bytesPerMib
-
-  /**
-    * Buffer size for client-side gunzipping of compressed data pulled from GCS.
-    *
-    * The guidelines for this size aren't super clear. They say:
-    *   1. Larger than 8KB
-    *   2. Around the size of the largest chunk in the gzipped stream
-    *
-    * GCS's resumable upload docs say upload chunks should be in multiples of 256KB,
-    * so it seems like a safe bet for a magic number.
-    */
-  val GunzipBufferSize: Int = 256 * bytesPerKib
 
   /**
     * Custom GCS header used when initializing a resumable upload to indicate the total
@@ -505,9 +546,40 @@ object GcsApi {
     */
   val ObjectMd5Key: String = "md5Hash"
 
+  /** Key used in GCS object metadata to report the total size of the object. */
+  val ObjectSizeKey: String = "size"
+
+  /** Key used in GCS object metadata to report the encoding of an object's contents. */
+  val ObjectEncodingKey: String = "contentEncoding"
+
   /**
     * Status code returned by GCS when a request to upload bytes to a resumable
     * upload succeeds, but the server still expects more bytes.
     */
   val ResumeIncompleteStatus = Status(308, "Resume Incomplete")
+
+  /**
+    * Build object metadata to include in upload requests to GCS.
+    *
+    * @param path the path of the object that will be uploaded, relative to its
+    *             enclosing bucket
+    * @param expectedMd5 an optional md5 which the object's contents should match
+    *                    after the upload completes. Triggers server-side content
+    *                    validation if included in the upload request
+    */
+  private[gcs] def buildUploadMetadata(
+    path: String,
+    expectedMd5: Option[String]
+  ): Json = {
+    // Object metadata is used by Google to register the upload to the correct pseudo-path.
+    val baseObjectMetadata = JsonObject("name" -> path.asJson)
+    expectedMd5
+      .fold(baseObjectMetadata) { hexMd5 =>
+        baseObjectMetadata.add(
+          ObjectMd5Key,
+          Base64.encodeBase64String(Hex.decodeHex(hexMd5.toCharArray)).asJson
+        )
+      }
+      .asJson
+  }
 }
