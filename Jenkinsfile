@@ -39,7 +39,7 @@ pipeline {
             when {
                 anyOf {
                     branch 'master'
-                    buildingTag()
+                    tag pattern: 'v\\d.*', comparator: 'REGEXP'
                 }
             }
             steps {
