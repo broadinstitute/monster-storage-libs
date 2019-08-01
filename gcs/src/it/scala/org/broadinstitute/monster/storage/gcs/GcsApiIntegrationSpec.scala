@@ -342,37 +342,6 @@ class GcsApiIntegrationSpec
     wasCreated.unsafeRunSync() shouldBe true
   }
 
-  it should "fail to create a new gcs object given an incorrect expected size when the object is larger than the the MaxBytesPerUploadRequest" in {
-    val path = s"test/${OffsetDateTime.now()}/foobar"
-    val bodySize = GcsApi.MaxBytesPerUploadRequest * 2
-    val body = bodyText(bodySize)
-    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync().toString())
-    val incorrectExpectedSize = bodySize + GcsApi.MaxBytesPerUploadRequest * 2
-
-    val tryCreate = withClient { api =>
-      api
-        .createObject(
-          bucket,
-          path,
-          textPlain,
-          incorrectExpectedSize.toLong,
-          Some(bodyMd5),
-          body
-        )
-    }
-
-    tryCreate.recover {
-      case GcsApi.GcsFailure(status, _, _) =>
-        status shouldBe Status.BadRequest
-        ()
-    }.unsafeRunSync()
-
-    if (gcsExists(BlobId.of(bucket, path))) {
-      IO.delay(gcsClient.delete(bucket, path)).as(())
-      gcsExists(BlobId.of(bucket, path)) shouldBe false
-    }
-  }
-
   it should "fail to create a new gcs object given an incorrect expected Md5 when the object is larger than the the MaxBytesPerUploadRequest" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
     val bodySize = GcsApi.MaxBytesPerUploadRequest * 2
