@@ -384,7 +384,6 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     doChecks.unsafeRunSync()
   }
 
-  // TODO: progresCHunkSize doesnt matter
   it should "create a new object in GCS by uploading in chunks" in {
     val ranges = new ArrayBuffer[(Long, Long)]()
     val bodyTextSize = MaxBytesPerUploadRequest * 2
