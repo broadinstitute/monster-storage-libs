@@ -176,7 +176,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     expectedMd5: Option[String],
     data: Stream[IO, Byte]
   ): IO[Unit] = {
-    if (expectedSize < MaxBytesPerUploadRequest.toLong) {
+    if (expectedSize < MaxBytesPerUploadRequest) {
       createObjectOneShot(bucket, path, contentType, expectedMd5, data)
     } else {
       for {
@@ -552,7 +552,7 @@ object GcsApi {
     * Google recommends this as the threshold for when to switch from a one-shot upload
     * to a resumable upload.
     */
-  val MaxBytesPerUploadRequest: Int = 5 * bytesPerMib
+  val MaxBytesPerUploadRequest: Long = 5L * bytesPerMib
 
   /**
     * Custom GCS header used when initializing a resumable upload to indicate the total

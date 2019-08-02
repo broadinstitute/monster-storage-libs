@@ -37,12 +37,6 @@ class GcsApiIntegrationSpec
       .take(n.toLong)
   }
 
-  // smaller than MaxBytesPerUploadRequest
-  private val bodySize = 2 * GcsApi.ChunkSize
-  private val body = bodyText(2 * GcsApi.ChunkSize)
-  // TODO: best way to get Md5
-  private val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync().toString())
-
   private val writerJson = {
     val tokenPath = sys.env
       .get("VAULT_TOKEN_PATH")
@@ -79,7 +73,7 @@ class GcsApiIntegrationSpec
         .flatMap(run)
     }
 
-  private def writeTestFile: Resource[IO, BlobId] = {
+  private def writeTestFile(body: Stream[IO, Byte]): Resource[IO, BlobId] = {
     val blobPath = s"test/${OffsetDateTime.now()}/lorem.ipsum"
     val blob = BlobId.of(bucket, blobPath)
     val blobInfo = BlobInfo.newBuilder(blob).setContentType("text/plain").build()
@@ -93,7 +87,7 @@ class GcsApiIntegrationSpec
     Resource.make(setup)(id => IO.delay(gcsClient.delete(id)).void)
   }
 
-  private def writeGzippedTestFile: Resource[IO, BlobId] = {
+  private def writeGzippedTestFile(body: Stream[IO, Byte]): Resource[IO, BlobId] = {
     val blobPath = s"test/${OffsetDateTime.now()}/lorem.ipsum.gz"
     val blob = BlobId.of(bucket, blobPath)
     val blobInfo = BlobInfo
@@ -124,7 +118,9 @@ class GcsApiIntegrationSpec
   behavior of "GcsApi"
 
   it should "read entire objects as a stream" in {
-    writeTestFile.use { blob =>
+    val body = bodyText(2 * GcsApi.ChunkSize)
+
+    writeTestFile(body).use { blob =>
       withClient(api => buildString(api.readObject(blob.getBucket, blob.getName)))
     }.unsafeRunSync() shouldBe buildString(body).unsafeRunSync()
   }
@@ -141,12 +137,14 @@ class GcsApiIntegrationSpec
    * we want to be sure it's always disabled.
    */
   it should "read gzipped data as-is, with no decompression" in {
-    val readText = writeGzippedTestFile.use { blob =>
+    val body = bodyText(2 * GcsApi.ChunkSize)
+
+    val readText = writeGzippedTestFile(body).use { blob =>
       withClient { api =>
         buildString {
           api
             .readObject(blob.getBucket, blob.getName)
-            .through(fs2.compress.gunzip(bodySize))
+            .through(fs2.compress.gunzip(2 * GcsApi.ChunkSize))
         }
       }
     }
@@ -156,7 +154,8 @@ class GcsApiIntegrationSpec
   }
 
   it should "read gzipped data with client-side decompression" in {
-    val readText = writeGzippedTestFile.use { blob =>
+    val body = bodyText(2 * GcsApi.ChunkSize)
+    val readText = writeGzippedTestFile(body).use { blob =>
       withClient { api =>
         buildString {
           api.readObject(blob.getBucket, blob.getName, gunzipIfNeeded = true)
@@ -169,7 +168,8 @@ class GcsApiIntegrationSpec
   }
 
   it should "no-op client-side decompression on uncompressed data" in {
-    val readText = writeGzippedTestFile.use { blob =>
+    val body = bodyText(2 * GcsApi.ChunkSize)
+    val readText = writeGzippedTestFile(body).use { blob =>
       withClient { api =>
         buildString {
           api.readObject(blob.getBucket, blob.getName, gunzipIfNeeded = true)
@@ -182,7 +182,8 @@ class GcsApiIntegrationSpec
   }
 
   it should "read objects starting at an offset" in {
-    val readText = writeTestFile.use { blob =>
+    val body = bodyText(2 * GcsApi.ChunkSize)
+    val readText = writeTestFile(body).use { blob =>
       withClient { api =>
         buildString(api.readObject(blob.getBucket, blob.getName, fromByte = 128L))
       }
@@ -193,14 +194,15 @@ class GcsApiIntegrationSpec
   }
 
   it should "read gzipped objects starting at an offset" in {
-    val readText = writeGzippedTestFile.use { blob =>
+    val body = bodyText(2 * GcsApi.ChunkSize)
+    val readText = writeGzippedTestFile(body).use { blob =>
       withClient { api =>
         api.readObject(blob.getBucket, blob.getName, fromByte = 10L).compile.toVector
       }
     }
 
     val expected = body
-      .through(fs2.compress.gzip(bodySize))
+      .through(fs2.compress.gzip(2 * GcsApi.ChunkSize))
       .drop(10)
       .compile
       .toVector
@@ -209,7 +211,8 @@ class GcsApiIntegrationSpec
   }
 
   it should "read objects ending before the final byte" in {
-    val readText = writeTestFile.use { blob =>
+    val body = bodyText(2 * GcsApi.ChunkSize)
+    val readText = writeTestFile(body).use { blob =>
       withClient { api =>
         buildString(
           api.readObject(blob.getBucket, blob.getName, untilByte = Some(10L))
@@ -222,7 +225,8 @@ class GcsApiIntegrationSpec
   }
 
   it should "read gzipped objects ending before the final byte" in {
-    val readText = writeGzippedTestFile.use { blob =>
+    val body = bodyText(2 * GcsApi.ChunkSize)
+    val readText = writeGzippedTestFile(body).use { blob =>
       withClient { api =>
         api
           .readObject(blob.getBucket, blob.getName, untilByte = Some(10L))
@@ -241,7 +245,8 @@ class GcsApiIntegrationSpec
   }
 
   it should "read slices in the middle of an object" in {
-    val readText = writeTestFile.use { blob =>
+    val body = bodyText(2 * GcsApi.ChunkSize)
+    val readText = writeTestFile(body).use { blob =>
       withClient { api =>
         buildString(
           api.readObject(
@@ -260,7 +265,8 @@ class GcsApiIntegrationSpec
   }
 
   it should "read slices in the middle of a gzipped object" in {
-    val readText = writeGzippedTestFile.use { blob =>
+    val body = bodyText(2 * GcsApi.ChunkSize)
+    val readText = writeGzippedTestFile(body).use { blob =>
       withClient { api =>
         api
           .readObject(blob.getBucket, blob.getName, fromByte = 10L, untilByte = Some(50L))
@@ -291,7 +297,8 @@ class GcsApiIntegrationSpec
     Option(gcsClient.get(blob)).exists(_.exists())
 
   it should "delete a GCS object and return true upon success" in {
-    val wasDeleted = writeGzippedTestFile.use { blob =>
+    val body = bodyText(2 * GcsApi.ChunkSize)
+    val wasDeleted = writeGzippedTestFile(body).use { blob =>
       withClient { api =>
         api.deleteObject(blob.getBucket, blob.getName).map { reportedDelete =>
           !gcsExists(blob) && reportedDelete
@@ -311,7 +318,7 @@ class GcsApiIntegrationSpec
   it should " create a new object in GCS when the object is smaller than the MaxBytesPerUploadRequest" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
     val bodySize = GcsApi.MaxBytesPerUploadRequest / 2
-    val body = bodyText(bodySize)
+    val body = bodyText(bodySize.toInt)
     val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync().toString())
 
     val wasCreated = withClient { api =>
@@ -328,7 +335,7 @@ class GcsApiIntegrationSpec
   it should " create a new object in GCS when the object is larger than the the MaxBytesPerUploadRequest" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
     val bodySize = GcsApi.MaxBytesPerUploadRequest * 2
-    val body = bodyText(bodySize)
+    val body = bodyText(bodySize.toInt)
     val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync().toString())
 
     val wasCreated = withClient { api =>
@@ -345,7 +352,7 @@ class GcsApiIntegrationSpec
   it should "fail to create a new gcs object given an incorrect expected Md5 when the object is larger than the the MaxBytesPerUploadRequest" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
     val bodySize = GcsApi.MaxBytesPerUploadRequest * 2
-    val body = bodyText(bodySize)
+    val body = bodyText(bodySize.toInt)
     val incorrectMd5 = DigestUtils.md5Hex("badMd5")
 
     val tryCreate = withClient { api =>
@@ -376,7 +383,7 @@ class GcsApiIntegrationSpec
   it should "fail to create a new gcs object given an incorrect expected Md5 when the object is smaller than the the MaxBytesPerUploadRequest" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
     val bodySize = GcsApi.MaxBytesPerUploadRequest / 2
-    val body = bodyText(bodySize)
+    val body = bodyText(bodySize.toInt)
     val incorrectMd5 = DigestUtils.md5Hex("badMd5")
 
     val tryCreate = withClient { api =>
@@ -409,6 +416,7 @@ class GcsApiIntegrationSpec
 
   it should "create an object in GCS in one upload with no expected md5" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
+    val body = bodyText(2 * GcsApi.ChunkSize)
 
     val wasCreated = withClient { api =>
       api
@@ -423,6 +431,8 @@ class GcsApiIntegrationSpec
 
   it should "create an object in GCS in one upload with a correct expected md5" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
+    val body = bodyText(2 * GcsApi.ChunkSize)
+    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync().toString())
 
     val wasCreated = withClient { api =>
       api
@@ -443,6 +453,7 @@ class GcsApiIntegrationSpec
 
   it should "fail to create an object in GCS in one upload with an incorrect md5" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
+    val body = bodyText(2 * GcsApi.ChunkSize)
 
     val tryCreate = withClient { api =>
       api.createObjectOneShot(
@@ -468,7 +479,8 @@ class GcsApiIntegrationSpec
   }
 
   it should "check if a GCS object exists and return true with an md5" in {
-    val objectExists = writeGzippedTestFile.use { blob =>
+    val body = bodyText(2 * GcsApi.ChunkSize)
+    val objectExists = writeGzippedTestFile(body).use { blob =>
       withClient { api =>
         api.statObject(blob.getBucket, blob.getName).map {
           case (reportsObjectExists, reportedMd5) =>
@@ -484,8 +496,9 @@ class GcsApiIntegrationSpec
 
   it should "check if a GCS object exists and return false" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
+    val body = bodyText(2 * GcsApi.ChunkSize)
 
-    val objectExists = writeGzippedTestFile.use { blob =>
+    val objectExists = writeGzippedTestFile(body).use { blob =>
       withClient { api =>
         api.statObject(blob.getBucket, path).map {
           case (reportsObjectExists, reportedMd5) =>
@@ -500,6 +513,8 @@ class GcsApiIntegrationSpec
   // init and upload
   it should "upload files using resumable uploads" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
+    val body = bodyText(2 * GcsApi.ChunkSize)
+    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync().toString())
 
     withClient { api =>
       for {
@@ -508,7 +523,7 @@ class GcsApiIntegrationSpec
             bucket,
             path,
             textPlain,
-            bodySize.toLong,
+            2L * GcsApi.ChunkSize,
             Some(bodyMd5)
           )
         output <- api.uploadBytes(
@@ -536,6 +551,8 @@ class GcsApiIntegrationSpec
 
   it should "upload files using resumable uploads over multiple upload calls" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
+    val body = bodyText(2 * GcsApi.ChunkSize)
+    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync().toString())
 
     withClient { api =>
       for {
@@ -544,7 +561,7 @@ class GcsApiIntegrationSpec
             bucket,
             path,
             textPlain,
-            bodySize.toLong,
+            2L * GcsApi.ChunkSize,
             Some(bodyMd5)
           )
         bytesUploaded <- api
@@ -552,7 +569,7 @@ class GcsApiIntegrationSpec
             bucket,
             uploadToken,
             0,
-            body.take(bodySize / 2L)
+            body.take(GcsApi.ChunkSize.toLong)
           )
         numUploaded = bytesUploaded.left.value
         finalOutput <- api.uploadBytes(
@@ -562,7 +579,7 @@ class GcsApiIntegrationSpec
           body.drop(numUploaded)
         )
       } yield {
-        bytesUploaded.left.value <= bodySize / 2L shouldBe true
+        bytesUploaded.left.value <=  GcsApi.ChunkSize shouldBe true
         finalOutput
       }
     }.bracket { output =>
@@ -580,6 +597,8 @@ class GcsApiIntegrationSpec
   }
 
   it should "report failure if attempting to upload to an uninitialized ID" in {
+    val body = bodyText(2 * GcsApi.ChunkSize)
+
     val tryInitAndUpload = withClient { api =>
       api.uploadBytes(
         bucket,
