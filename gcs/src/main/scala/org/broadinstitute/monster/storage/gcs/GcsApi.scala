@@ -168,7 +168,42 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
       }
     }
 
-  // TODO: if the data is greater than n bytes use initResumableUpload and the uploadBytes in multiple chunks
+  def createObject(
+    bucket: String,
+    path: String,
+    contentType: `Content-Type`,
+    expectedSize: Long,
+    expectedMd5: Option[String],
+    data: Stream[IO, Byte]
+  ): IO[Unit] = {
+    if (expectedSize < MaxBytesPerUploadRequest) {
+      createObjectOneShot(bucket, path, contentType, expectedMd5, data)
+    } else {
+      for {
+        uploadToken <- initResumableUpload(
+          bucket,
+          path,
+          contentType,
+          expectedSize,
+          expectedMd5
+        )
+        upload <- uploadBytes(bucket, uploadToken, 0L, data)
+        output <- upload.fold(
+          bytesUploaded =>
+            IO.raiseError(
+              new Exception(
+                s"Expected to upload $expectedSize bytes to $path in $bucket but instead uploaded $bytesUploaded"
+              )
+            ),
+          _ => IO.unit
+        )
+      } yield {
+        output
+      }
+    }
+  }
+
+  // TODO: return the bytes uploaded rather than unit
   /**
     * Create a new object in GCS using a multipart upload.
     *
@@ -184,7 +219,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     *                    server-side content validation in GCS
     * @param data bytes to write into the new file
     */
-  def createObject(
+  def createObjectOneShot(
     bucket: String,
     path: String,
     contentType: `Content-Type`,
@@ -517,7 +552,7 @@ object GcsApi {
     * Google recommends this as the threshold for when to switch from a one-shot upload
     * to a resumable upload.
     */
-  val MaxBytesPerUploadRequest: Int = 5 * bytesPerMib
+  val MaxBytesPerUploadRequest: Long = 5L * bytesPerMib
 
   /**
     * Custom GCS header used when initializing a resumable upload to indicate the total

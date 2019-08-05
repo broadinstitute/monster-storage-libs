@@ -21,28 +21,99 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
 
   private val readObjectURI = baseGcsUri(bucket, path, "alt" -> "media")
   private val statObjectURI = baseGcsUri(bucket, path, "alt" -> "json")
-  private val createObjectURI = baseGcsUploadUri(bucket, "multipart")
+  private val createObjectOneShotURI = baseGcsUploadUri(bucket, "multipart")
   private val initResumableUploadURI = baseGcsUploadUri(bucket, "resumable")
   private val uploadURI =
     baseGcsUploadUri(bucket, "resumable").withQueryParam("upload_id", uploadToken)
 
   private val acceptEncodingHeader = Header("Accept-Encoding", "identity, gzip")
 
-  private def bodyText(n: Int): Stream[IO, Byte] =
+  private def bodyText(n: Long): Stream[IO, Byte] =
     Stream
-      .randomSeeded(n.toLong)[IO]
+      .randomSeeded(n)[IO]
       .map(String.valueOf)
       .flatMap(s => Stream.emits(s.getBytes))
-      .take(n.toLong)
+      .take(n)
   private def stringify(bytes: Stream[IO, Byte]): IO[String] =
     bytes.through(fs2.text.utf8Decode).compile.toChunk.map(_.toArray[String].mkString(""))
+
+  private def assertInitResumableUpload(
+    request: Request[IO],
+    expectedSize: Long,
+    expectedMd5: Option[String],
+    uploadToken: String
+  ): Resource[IO, Response[IO]] = {
+    val checks = request.body.compile.toChunk.map { bodyChunk =>
+      request.method shouldBe Method.POST
+      request.uri shouldBe initResumableUploadURI
+      request.headers.toList should contain theSameElementsAs List(
+        `Content-Length`.unsafeFromLong(bodyChunk.size.toLong),
+        `Content-Type`(MediaType.application.json, Charset.`UTF-8`),
+        Header(UploadContentLengthHeader, expectedSize.toString()),
+        Header(UploadContentTypeHeader, "text/event-stream")
+      )
+
+      io.circe.parser
+        .parse(new String(bodyChunk.toArray[Byte]))
+        .right
+        .value shouldBe buildUploadMetadata(path, expectedMd5)
+      ()
+    }
+
+    Resource.liftF(checks).map { _ =>
+      Response[IO](
+        status = Status.Ok,
+        headers = Headers.of(
+          Header(UploadIDHeader, uploadToken)
+        )
+      )
+    }
+  }
+
+  private def assertUploadBytes(
+    request: Request[IO],
+    ranges: ArrayBuffer[(Long, Long)],
+    progressChunkSize: Long,
+    lastByte: Long,
+    allBytes: Boolean
+  ): Resource[IO, Response[IO]] = {
+    val checks = request.body.compile.toChunk.map { bodyChunk =>
+      request.method shouldBe Method.PUT
+      request.uri shouldBe uploadURI
+      request.headers.toList should contain(
+        `Content-Length`.unsafeFromLong(bodyChunk.size.toLong)
+      )
+    }
+
+    val getRange = for {
+      _ <- checks
+      header <- request.headers
+        .get(`Content-Range`)
+        .liftTo[IO](new RuntimeException)
+      max <- header.range.second.liftTo[IO](new RuntimeException)
+    } yield {
+      (header.range.first, max)
+    }
+
+    Resource.liftF(getRange).map {
+      case (min, max) =>
+        ranges += (min -> max)
+
+        val lastRecordedByte = math.min(max, min + progressChunkSize - 1)
+        val done = lastRecordedByte == lastByte
+        Response[IO](
+          status = if (allBytes && done) Status.Ok else ResumeIncompleteStatus,
+          headers = Headers.of(Range(0, lastRecordedByte))
+        )
+    }
+  }
 
   behavior of "GcsApi"
 
   // readObject
   def testReadObject(
     description: String,
-    numBytes: Int = smallChunkSize,
+    numBytes: Long = smallChunkSize.toLong,
     start: Long = 0,
     end: Option[Long] = None,
     gzip: Boolean = false,
@@ -118,7 +189,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
 
   it should behave like testReadObject(
     "read objects as a stream, using multiple requests",
-    numBytes = (smallChunkSize * 2.5).toInt
+    numBytes = (smallChunkSize * 2.5).toLong
   )
 
   it should behave like testReadObject(
@@ -244,51 +315,122 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       .unsafeRunSync() shouldBe (true -> Some(theMd5))
   }
 
+  private def singleShotApiRequest(stringBody: String, md5: Option[String]): GcsApi = {
+    new GcsApi(req => {
+      req.method shouldBe Method.POST
+      req.uri shouldBe createObjectOneShotURI
+      req.contentType.value.mediaType.isMultipart shouldBe true
+
+      val dataChecks = req.as[Multipart[IO]].flatMap {
+        multipart =>
+          multipart.parts.size shouldBe 2
+          val metadataPart = multipart.parts(0)
+          val dataPart = multipart.parts(1)
+
+          metadataPart.headers
+            .get(`Content-Type`)
+            .value
+            .mediaType shouldBe MediaType.application.json
+          dataPart.headers
+            .get(`Content-Type`)
+            .value shouldBe `Content-Type`(MediaType.`text/event-stream`)
+
+          metadataPart.body.compile.toChunk.flatMap { metadataBytes =>
+            io.circe.parser
+              .parse(new String(metadataBytes.toArray[Byte]))
+              .right
+              .value shouldBe buildUploadMetadata(path, md5)
+
+            dataPart.body.compile.toChunk.map { dataBytes =>
+              new String(dataBytes.toArray[Byte]) shouldBe stringBody
+            }
+          }
+      }
+
+      Resource.liftF(dataChecks).map { _ =>
+        Response[IO](status = Status.Ok)
+      }
+    })
+  }
+
   // createObject
-  def testCreateObject(description: String, includeMd5: Boolean): Unit = {
+  it should "create a new object in GCS by using a multipart upload in a single shot" in {
+    val bodyTextSize = MaxBytesPerUploadRequest / 2
+    val baseBytes = bodyText(bodyTextSize)
+    val doChecks = for {
+      stringBody <- stringify(baseBytes)
+      md5 = Some(DigestUtils.md5Hex(stringBody))
+      api = singleShotApiRequest(stringBody, md5)
+      _ <- api
+        .createObject(
+          bucket,
+          path,
+          `Content-Type`(MediaType.`text/event-stream`),
+          bodyTextSize,
+          md5,
+          baseBytes
+        )
+    } yield ()
+
+    doChecks.unsafeRunSync()
+  }
+
+  it should "create a new object in GCS by uploading in chunks" in {
+    val ranges = new ArrayBuffer[(Long, Long)]()
+    val bodyTextSize = MaxBytesPerUploadRequest * 2
+    val baseBytes = bodyText(bodyTextSize)
+
+    val doChecks = for {
+      stringBody <- stringify(baseBytes)
+      md5 = Some(DigestUtils.md5Hex(stringBody))
+
+      api = new GcsApi(req => {
+        if (req.uri == initResumableUploadURI) {
+          assertInitResumableUpload(
+            req,
+            bodyTextSize,
+            md5,
+            uploadToken
+          )
+        } else {
+          assertUploadBytes(
+            req,
+            ranges,
+            MaxBytesPerUploadRequest * 2L,
+            bodyTextSize - 1L,
+            true
+          )
+        }
+      })
+
+      _ <- api
+        .createObject(
+          bucket,
+          path,
+          `Content-Type`(MediaType.`text/event-stream`),
+          bodyTextSize,
+          md5,
+          baseBytes
+        )
+    } yield ()
+
+    doChecks.unsafeRunSync()
+    ranges shouldBe (0 to bodyTextSize.toInt - 1 by ChunkSize).map { n =>
+      n -> math.min(bodyTextSize.toInt - 1, n + ChunkSize - 1)
+    }
+  }
+
+  // createObjectOneShot
+  def testCreateObjectOneShot(description: String, includeMd5: Boolean): Unit = {
     it should description in {
-      val baseBytes = bodyText(smallChunkSize * 16)
+      val baseBytes = bodyText(smallChunkSize.toLong)
 
       val doChecks = for {
         stringBody <- stringify(baseBytes)
         md5 = if (includeMd5) Some(DigestUtils.md5Hex(stringBody)) else None
-        api = new GcsApi(req => {
-          req.method shouldBe Method.POST
-          req.uri shouldBe createObjectURI
-          req.contentType.value.mediaType.isMultipart shouldBe true
-
-          val dataChecks = req.as[Multipart[IO]].flatMap {
-            multipart =>
-              multipart.parts.size shouldBe 2
-              val metadataPart = multipart.parts(0)
-              val dataPart = multipart.parts(1)
-
-              metadataPart.headers
-                .get(`Content-Type`)
-                .value
-                .mediaType shouldBe MediaType.application.json
-              dataPart.headers
-                .get(`Content-Type`)
-                .value shouldBe `Content-Type`(MediaType.`text/event-stream`)
-
-              metadataPart.body.compile.toChunk.flatMap { metadataBytes =>
-                io.circe.parser
-                  .parse(new String(metadataBytes.toArray[Byte]))
-                  .right
-                  .value shouldBe buildUploadMetadata(path, md5)
-
-                dataPart.body.compile.toChunk.map { dataBytes =>
-                  new String(dataBytes.toArray[Byte]) shouldBe stringBody
-                }
-              }
-          }
-
-          Resource.liftF(dataChecks).map { _ =>
-            Response[IO](status = Status.Ok)
-          }
-        })
+        api = singleShotApiRequest(stringBody, md5)
         _ <- api
-          .createObject(
+          .createObjectOneShot(
             bucket,
             path,
             `Content-Type`(MediaType.`text/event-stream`),
@@ -301,11 +443,11 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     }
   }
 
-  it should behave like testCreateObject(
+  it should behave like testCreateObjectOneShot(
     "create a GCS object using a multipart upload",
     includeMd5 = false
   )
-  it should behave like testCreateObject(
+  it should behave like testCreateObjectOneShot(
     "include expected md5s in multipart upload requests",
     includeMd5 = true
   )
@@ -340,31 +482,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       val expectedMd5 = if (withMd5) Some("abcdef") else None
 
       val api = new GcsApi(req => {
-        val checks = req.body.compile.toChunk.map {
-          bodyChunk =>
-            req.method shouldBe Method.POST
-            req.uri shouldBe initResumableUploadURI
-            req.headers.toList should contain theSameElementsAs List(
-              `Content-Length`.unsafeFromLong(bodyChunk.size.toLong),
-              `Content-Type`(MediaType.application.json, Charset.`UTF-8`),
-              Header(GcsApi.UploadContentLengthHeader, expectedSize.toString),
-              Header(GcsApi.UploadContentTypeHeader, "text/event-stream")
-            )
-
-            io.circe.parser
-              .parse(new String(bodyChunk.toArray[Byte]))
-              .right
-              .value shouldBe GcsApi.buildUploadMetadata(path, expectedMd5)
-        }
-
-        Resource.liftF(checks).map { _ =>
-          Response[IO](
-            status = Status.Ok,
-            headers = Headers.of(
-              Header(GcsApi.UploadIDHeader, uploadToken)
-            )
-          )
-        }
+        assertInitResumableUpload(req, expectedSize, expectedMd5, uploadToken)
       })
 
       api
@@ -393,7 +511,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   def testUpload(
     description: String,
     allBytes: Boolean,
-    numBytes: Int = smallChunkSize,
+    numBytes: Long = smallChunkSize.toLong,
     start: Long = 0L,
     recordedRatio: Double = 1.0
   ): Unit = {
@@ -405,35 +523,13 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       val bytes = bodyText(numBytes)
 
       val api = new GcsApi(req => {
-        val checks = req.body.compile.toChunk.map { chunk =>
-          req.method shouldBe Method.PUT
-          req.uri shouldBe uploadURI
-          req.headers.toList should contain(
-            `Content-Length`.unsafeFromLong(chunk.size.toLong)
-          )
-        }
-
-        val getRange = for {
-          _ <- checks
-          header <- req.headers
-            .get(`Content-Range`)
-            .liftTo[IO](new RuntimeException)
-          max <- header.range.second.liftTo[IO](new RuntimeException)
-        } yield {
-          (header.range.first, max)
-        }
-
-        Resource.liftF(getRange).map {
-          case (min, max) =>
-            ranges += (min -> max)
-
-            val lastRecordedByte = math.min(max, min + progressChunkSize - 1)
-            val done = lastRecordedByte == lastByte
-            Response[IO](
-              status = if (allBytes && done) Status.Ok else ResumeIncompleteStatus,
-              headers = Headers.of(Range(0, lastRecordedByte))
-            )
-        }
+        assertUploadBytes(
+          req,
+          ranges,
+          progressChunkSize.toLong,
+          lastByte,
+          allBytes
+        )
       })
 
       val actual = api
@@ -461,13 +557,13 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   it should behave like testUpload(
     "upload bytes to a resumable upload in multiple chunks",
     allBytes = true,
-    numBytes = (smallChunkSize * 2.5).toInt
+    numBytes = (smallChunkSize * 2.5).toLong
   )
 
   it should behave like testUpload(
     "upload bytes to a resumable upload in multiple chunks, without finishing",
     allBytes = false,
-    numBytes = (smallChunkSize * 2.5).toInt
+    numBytes = (smallChunkSize * 2.5).toLong
   )
 
   it should behave like testUpload(
