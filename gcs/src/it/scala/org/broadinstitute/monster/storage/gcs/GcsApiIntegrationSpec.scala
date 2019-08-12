@@ -306,7 +306,7 @@ class GcsApiIntegrationSpec
               untilByte = Some(50L)
             )
             .compile
-            .toVectorc
+            .toVector
         }
       }
       expected <- Stream
