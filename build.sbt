@@ -54,6 +54,7 @@ val log4CatsVersion = "0.3.0"
 
 // Web.
 val http4sVersion = "0.20.6"
+val sshJVersion = "0.27.0"
 
 // Storage libraries.
 val commonsNetVersion = "3.6"
@@ -61,7 +62,7 @@ val googleAuthVersion = "0.16.2"
 
 // Testing.
 val googleCloudJavaVersion = "1.84.0"
-val scalaMockVersion = "4.2.0"
+val scalaMockVersion = "4.4.0"
 val scalaTestVersion = "3.0.8"
 val vaultDriverVersion = "4.1.0"
 
@@ -78,12 +79,13 @@ val commonSettings = Seq(
     )
   ),
   Compile / doc / scalacOptions += "-no-link-warnings",
-  Test / fork := true
+  Test / fork := true,
+  IntegrationTest / fork := true
 )
 
 lazy val `monster-storage-libs` = project
   .in(file("."))
-  .aggregate(`gcs-lib`, `ftp-lib`)
+  .aggregate(`gcs-lib`, `ftp-lib`, `sftp-lib`)
   .settings(publish / skip := true)
 
 lazy val `gcs-lib` = project
@@ -147,3 +149,30 @@ lazy val `ftp-lib` = project
     "org.typelevel" %% "cats-effect" % catsEffectVersion
   )
 )
+
+lazy val `sftp-lib` = project
+  .in(file("sftp"))
+  .configs(IntegrationTest)
+  .enablePlugins(PublishPlugin)
+  .settings(commonSettings)
+  .settings(
+    Defaults.itSettings,
+    libraryDependencies ++= Seq(
+      "ch.qos.logback" % "logback-classic" % logbackVersion,
+      "co.fs2" %% "fs2-core" % fs2Version,
+      "co.fs2" %% "fs2-io" % fs2Version,
+      "com.hierynomus" % "sshj" % sshJVersion
+    ),
+    // All tests.
+    libraryDependencies ++= Seq(
+      "org.scalatest" %% "scalatest" % scalaTestVersion
+    ).map(_ % s"${Test.name},${IntegrationTest.name}"),
+    // Unit tests only.
+    libraryDependencies ++= Seq(
+      "org.scalamock" %% "scalamock" % scalaMockVersion
+    ).map(_ % Test),
+    dependencyOverrides := Seq(
+      "org.typelevel" %% "cats-core" % catsVersion,
+      "org.typelevel" %% "cats-effect" % catsEffectVersion
+    )
+  )
