@@ -50,10 +50,14 @@ val circeDerivationVersion = "0.11.0-M1"
 
 // Logging.
 val logbackVersion = "1.2.3"
+val log4CatsVersion = "0.3.0"
 
 // Web.
-val googleAuthVersion = "0.16.2"
 val http4sVersion = "0.20.6"
+
+// Storage libraries.
+val commonsNetVersion = "3.6"
+val googleAuthVersion = "0.16.2"
 
 // Testing.
 val googleCloudJavaVersion = "1.84.0"
@@ -79,7 +83,7 @@ val commonSettings = Seq(
 
 lazy val `monster-storage-libs` = project
   .in(file("."))
-  .aggregate(`gcs-lib`)
+  .aggregate(`gcs-lib`, `ftp-lib`)
   .settings(publish / skip := true)
 
 lazy val `gcs-lib` = project
@@ -115,3 +119,31 @@ lazy val `gcs-lib` = project
       "org.typelevel" %% "cats-effect" % catsEffectVersion
     )
   )
+
+lazy val `ftp-lib` = project
+.in(file("ftp"))
+.configs(IntegrationTest)
+.enablePlugins(PublishPlugin)
+.settings(commonSettings)
+.settings(
+  Defaults.itSettings,
+  libraryDependencies ++= Seq(
+    "ch.qos.logback" % "logback-classic" % logbackVersion,
+    "co.fs2" %% "fs2-core" % fs2Version,
+    "co.fs2" %% "fs2-io" % fs2Version,
+    "commons-net" % "commons-net" % commonsNetVersion,
+    "io.chrisdavenport" %% "log4cats-slf4j" % log4CatsVersion
+  ),
+  // All tests.
+  libraryDependencies ++= Seq(
+    "org.scalatest" %% "scalatest" % scalaTestVersion
+  ).map(_ % s"${Test.name},${IntegrationTest.name}"),
+  // Unit tests only.
+  libraryDependencies ++= Seq(
+    "org.scalamock" %% "scalamock" % scalaMockVersion
+  ).map(_ % Test),
+  dependencyOverrides := Seq(
+    "org.typelevel" %% "cats-core" % catsVersion,
+    "org.typelevel" %% "cats-effect" % catsEffectVersion
+  )
+)
