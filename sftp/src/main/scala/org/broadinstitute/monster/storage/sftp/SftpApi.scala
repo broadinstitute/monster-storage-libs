@@ -120,7 +120,7 @@ object SftpApi {
   }
 
   /**
-    * Construct a client which will send authorized requests to an SFTP site.
+    * Construct a client which will send authenticated requests to an SFTP site.
     *
     * @param loginInfo configuration determining which SFTP site the client will
     *                  connect to
@@ -134,6 +134,7 @@ object SftpApi {
         override def openRemoteFile(path: String, offset: Long): IO[InputStream] =
           for {
             file <- IO.delay(sftp.open(path))
+            // TODO: Configure keep-alive here.
             inStream <- IO.delay(new file.RemoteFileInputStream(offset))
           } yield {
             inStream: InputStream
