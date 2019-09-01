@@ -2,6 +2,7 @@ package org.broadinstitute.monster.storage.sftp
 
 import cats.effect.{ContextShift, IO}
 import fs2.Stream
+import net.schmizz.sshj.sftp.FileMode
 import org.scalatest.{EitherValues, FlatSpec, Matchers}
 
 import scala.concurrent.ExecutionContext
@@ -90,5 +91,42 @@ class SftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
     val errCause = bytesOrError.left.value.getCause
     errMessage should include(fakePath)
     errCause.getMessage should include("not found")
+  }
+
+  it should "list directories" in {
+    val listed = Stream
+      .resource(SftpApi.build(testLogin, ExecutionContext.global))
+      .flatMap(_.listDirectory(""))
+      .compile
+      .toList
+      .unsafeRunSync()
+
+    listed should contain allElementsOf List(
+      "pub" -> FileMode.Type.DIRECTORY,
+      "readme.txt" -> FileMode.Type.REGULAR
+    )
+  }
+
+  it should "preserve full paths when listing" in {
+    val listed = Stream
+      .resource(SftpApi.build(testLogin, ExecutionContext.global))
+      .flatMap(_.listDirectory("pub/example"))
+      .compile
+      .toList
+      .unsafeRunSync()
+
+    listed should contain(testPath -> FileMode.Type.REGULAR)
+  }
+
+  it should "raise a useful error when listing a non-directory" in {
+    val listedOrErr = Stream
+      .resource(SftpApi.build(testLogin, ExecutionContext.global))
+      .flatMap(_.listDirectory(testPath))
+      .compile
+      .toChunk
+      .attempt
+      .unsafeRunSync()
+
+    listedOrErr.left.value.getMessage should include(testPath)
   }
 }

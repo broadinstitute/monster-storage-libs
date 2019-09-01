@@ -3,6 +3,7 @@ package org.broadinstitute.monster.storage.sftp
 import java.io.ByteArrayInputStream
 
 import cats.effect.{ContextShift, IO}
+import net.schmizz.sshj.sftp.{FileAttributes, FileMode, RemoteResourceInfo}
 import org.scalamock.scalatest.MockFactory
 import org.scalatest.{FlatSpec, Matchers}
 
@@ -12,7 +13,8 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory {
 
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
 
-  private val fakePath = "some/path/to/some/file"
+  private val fakeDir = "some/path/to/some"
+  private val fakePath = s"$fakeDir/file"
   private val fakeContents = "some text"
 
   behavior of "SftpApi"
@@ -84,5 +86,37 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory {
         .unsafeRunSync()
 
     bytes.toArray shouldBe expectedBytes.take(3)
+  }
+
+  it should "list remote directories" in {
+    val expected =
+      List(fakePath -> FileMode.Type.REGULAR, s"$fakeDir/dir" -> FileMode.Type.DIRECTORY)
+    val fakeSftp = mock[SftpApi.Client]
+    (fakeSftp.listRemoteDirectory _).expects(fakeDir).returning {
+      IO.pure {
+        expected.map {
+          case (name, tpe) =>
+            val attrs = new FileAttributes.Builder().withType(tpe).build()
+
+            val info = stub[RemoteResourceInfo]
+            (info.getPath _).when().returns(name)
+            (info.getAttributes _).when().returns(attrs)
+
+            info
+        }
+      }
+    }
+
+    val api = new SftpApi(fakeSftp, ExecutionContext.global)
+    val contents = api.listDirectory(fakeDir).compile.toList.unsafeRunSync()
+    contents should contain theSameElementsAs expected
+  }
+
+  it should "not break if listing an empty directory" in {
+    val fakeSftp = mock[SftpApi.Client]
+    (fakeSftp.listRemoteDirectory _).expects(fakeDir).returning(IO.pure(Nil))
+    val api = new SftpApi(fakeSftp, ExecutionContext.global)
+    val contents = api.listDirectory(fakeDir).compile.toList.unsafeRunSync()
+    contents shouldBe empty
   }
 }

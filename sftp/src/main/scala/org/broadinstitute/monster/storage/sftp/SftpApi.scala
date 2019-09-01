@@ -6,10 +6,11 @@ import cats.effect.{ContextShift, IO, Resource}
 import cats.implicits._
 import fs2.Stream
 import net.schmizz.sshj.SSHClient
-import net.schmizz.sshj.sftp.SFTPClient
+import net.schmizz.sshj.sftp.{FileMode, RemoteResourceInfo, SFTPClient}
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 
 import scala.concurrent.ExecutionContext
+import scala.collection.JavaConverters._
 
 /**
   * Client which can perform I/O operations against an SFTP site.
@@ -47,6 +48,26 @@ class SftpApi private[sftp] (
           .raiseError[IO](new RuntimeException(s"Failed to read bytes from $path", err))
       }
   }
+
+  /**
+    * List the contents of an SFTP directory.
+    *
+    * @param path within the configured SFTP site pointing to the directory to list
+    * @return name/type pairs for all entries in the listed directory
+    */
+  def listDirectory(path: String): Stream[IO, (String, FileMode.Type)] = {
+    val getEntries = cs.evalOn(blockingEc)(client.listRemoteDirectory(path))
+
+    Stream
+      .eval(getEntries)
+      .flatMap(Stream.emits)
+      .map { info =>
+        (info.getPath, info.getAttributes.getType)
+      }
+      .handleErrorWith { err =>
+        Stream.raiseError[IO](new RuntimeException(s"Failed to list $path", err))
+      }
+  }
 }
 
 object SftpApi {
@@ -55,10 +76,13 @@ object SftpApi {
   val ReadChunkSize = 8192
 
   /** Thin abstraction over sshj's `SFTPClient`, to enable mocking calls in unit tests. */
-  trait Client {
+  private[sftp] trait Client {
 
     /** Use SFTP to open an input stream for a remote file, starting at an offset. */
     def openRemoteFile(path: String, offset: Long): IO[InputStream]
+
+    /** Use SFTP to list the contents of a remote directory. */
+    def listRemoteDirectory(path: String): IO[List[RemoteResourceInfo]]
   }
 
   /**
@@ -114,6 +138,9 @@ object SftpApi {
           } yield {
             inStream: InputStream
           }
+
+        override def listRemoteDirectory(path: String): IO[List[RemoteResourceInfo]] =
+          IO.delay(sftp.ls(path)).map(_.asScala.toList)
       }
 
       new SftpApi(realClient, blockingEc)
