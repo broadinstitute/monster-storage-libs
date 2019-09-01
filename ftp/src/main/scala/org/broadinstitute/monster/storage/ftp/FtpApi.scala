@@ -6,7 +6,7 @@ import cats.effect.{ContextShift, IO, Resource}
 import cats.implicits._
 import fs2.Stream
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
-import org.apache.commons.net.ftp.{FTP, FTPClient, FTPReply}
+import org.apache.commons.net.ftp.{FTP, FTPClient, FTPFile, FTPFileFilters, FTPReply}
 
 import scala.concurrent.ExecutionContext
 
@@ -58,6 +58,36 @@ class FtpApi private[ftp] (
           .raiseError[IO](new RuntimeException(s"Failed to read bytes from $path", err))
       }
   }
+
+  /**
+    * List the contents of a remote directory, returning their names and file types.
+    *
+    * @param path path within the configured FTP site pointing to the directory-to-list
+    */
+  def listDirectory(path: String): Stream[IO, (String, FileType)] =
+    Stream.eval(client.statRemoteFile(path)).flatMap {
+      case None =>
+        Stream.raiseError[IO](
+          new RuntimeException(s"Cannot list contents of nonexistent path: $path")
+        )
+      case Some(pathInfo) =>
+        if (pathInfo.isDirectory) {
+          Stream.eval(client.listRemoteDirectory(path)).flatMap(Stream.emits).map {
+            ftpFile =>
+              val tpe = ftpFile.getType match {
+                case FTPFile.FILE_TYPE          => RegularFile
+                case FTPFile.DIRECTORY_TYPE     => Directory
+                case FTPFile.SYMBOLIC_LINK_TYPE => Symlink
+                case _                          => Other
+              }
+              (ftpFile.getName, tpe)
+          }
+        } else {
+          Stream.raiseError[IO](
+            new RuntimeException(s"Cannot list contents of non-directory: $path")
+          )
+        }
+    }
 }
 
 object FtpApi {
@@ -86,7 +116,26 @@ object FtpApi {
       * returns `null` when requesting bytes for a file that doesn't exist.
       */
     def openRemoteFile(path: String, offset: Long): Resource[IO, Option[InputStream]]
+
+    /** Use FTP to get info about a remote file, if it exists. */
+    def statRemoteFile(path: String): IO[Option[FTPFile]]
+
+    /** Use FTP to list the contents of a remote directory. */
+    def listRemoteDirectory(path: String): IO[List[FTPFile]]
   }
+
+  /**
+    * Enum representation of FTP file types.
+    *
+    * TODO: This representation isn't bound to FTP. It'd probably be worth breaking
+    * out a new 'common' project to hold its definition, and then have each lib adapt
+    * their specific methods to use it.
+    */
+  sealed trait FileType
+  case object RegularFile extends FileType
+  case object Directory extends FileType
+  case object Symlink extends FileType
+  case object Other extends FileType
 
   /**
     * Build a resource which will connect to a remote FTP site, authenticate with the site,
@@ -194,6 +243,20 @@ object FtpApi {
             }
 
           Resource.make(beginCommand)(finishCommand)
+        }
+
+      override def statRemoteFile(path: String): IO[Option[FTPFile]] =
+        connectToSite(connectionInfo, blockingEc).use { ftp =>
+          cs.evalOn(blockingEc) {
+            IO.delay(ftp.mlistFile(path))
+          }
+        }.map(Option(_))
+
+      override def listRemoteDirectory(path: String): IO[List[FTPFile]] =
+        connectToSite(connectionInfo, blockingEc).use { ftp =>
+          cs.evalOn(blockingEc) {
+            IO.delay(ftp.listFiles(path, FTPFileFilters.NON_NULL).toList)
+          }
         }
     }
 

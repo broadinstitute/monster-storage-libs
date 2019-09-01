@@ -156,4 +156,75 @@ class FtpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
 
     bytesOrError.left.value.getMessage should include(fakePath)
   }
+
+  private val testDir = "pub/clinvar"
+  private val testDirContents = List(
+    "ClinGen" -> FtpApi.Directory,
+    "ConceptID_history.txt" -> FtpApi.RegularFile,
+    "README.txt" -> FtpApi.RegularFile,
+    "README_VCF.txt" -> FtpApi.RegularFile,
+    "clinvar_public.xsd" -> FtpApi.Symlink,
+    "clinvar_submission.xsd" -> FtpApi.Symlink,
+    "disease_names" -> FtpApi.RegularFile,
+    "document_archives" -> FtpApi.Directory,
+    "gene_condition_source_id" -> FtpApi.RegularFile,
+    "presentations" -> FtpApi.Directory,
+    "release_notes" -> FtpApi.Directory,
+    "submission_templates" -> FtpApi.Directory,
+    "tab_delimited" -> FtpApi.Directory,
+    "vcf_GRCh37" -> FtpApi.Directory,
+    "vcf_GRCh38" -> FtpApi.Directory,
+    "xml" -> FtpApi.Directory,
+    "xsd_public" -> FtpApi.Directory,
+    "xsd_submission" -> FtpApi.Directory
+  )
+  private val testEmptyDir = "pub/README"
+
+  it should "list remote directories" in {
+    val contents = Stream
+      .resource(FtpApi.build(testInfo, ExecutionContext.global))
+      .flatMap(_.listDirectory(testDir))
+      .compile
+      .toList
+      .unsafeRunSync()
+
+    contents should contain theSameElementsAs testDirContents
+  }
+
+  it should "not crash on listing empty directories" in {
+    val contents = Stream
+      .resource(FtpApi.build(testInfo, ExecutionContext.global))
+      .flatMap(_.listDirectory(testEmptyDir))
+      .compile
+      .toList
+      .unsafeRunSync()
+
+    contents shouldBe Nil
+  }
+
+  it should "raise a helpful error if listing a nonexistent directory" in {
+    val fakePath = "foobar"
+
+    val contentsOrError = Stream
+      .resource(FtpApi.build(testInfo, ExecutionContext.global))
+      .flatMap(_.listDirectory(fakePath))
+      .compile
+      .toList
+      .attempt
+      .unsafeRunSync()
+
+    contentsOrError.left.value.getMessage should include(fakePath)
+  }
+
+  it should "raise a helpful error if listing a non-directory" in {
+    val contentsOrError = Stream
+      .resource(FtpApi.build(testInfo, ExecutionContext.global))
+      .flatMap(_.listDirectory(testPath))
+      .compile
+      .toList
+      .attempt
+      .unsafeRunSync()
+
+    contentsOrError.left.value.getMessage should include(testPath)
+  }
 }
