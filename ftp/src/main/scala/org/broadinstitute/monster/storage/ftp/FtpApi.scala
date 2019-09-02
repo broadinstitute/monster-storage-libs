@@ -4,9 +4,9 @@ import java.io.InputStream
 
 import cats.effect.{ContextShift, IO, Resource}
 import cats.implicits._
-import fs2.Stream
+import fs2.{Chunk, Stream}
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
-import org.apache.commons.net.ftp.{FTP, FTPClient, FTPFile, FTPFileFilters, FTPReply}
+import org.apache.commons.net.ftp._
 
 import scala.concurrent.ExecutionContext
 
@@ -38,19 +38,44 @@ class FtpApi private[ftp] (
     fromByte: Long = 0L,
     untilByte: Option[Long] = None
   ): Stream[IO, Byte] = {
-    val getByteStream = for {
-      _ <- logger.info(s"Opening $path at $fromByte")
-      bytes <- client.openRemoteFile(path, fromByte).use {
-        case None           => IO.raiseError(new RuntimeException(s"Failed to open $path"))
-        case Some(inStream) => logger.info(s"Successfully opened $path").as(inStream)
+
+    /*
+     * Helper method used to stream the contents of `path` from a start position.
+     *
+     * If the data connection is severed by the server mid-transfer, this method
+     * will recursively retry starting at the last-received byte.
+     */
+    def readStream(start: Long): Stream[IO, Byte] = {
+      val getByteStream = for {
+        _ <- logger.info(s"Opening $path at byte $start")
+        bytes <- client.openRemoteFile(path, start).use {
+          case None           => IO.raiseError(new RuntimeException(s"Failed to open $path"))
+          case Some(inStream) => logger.info(s"Successfully opened $path").as(inStream)
+        }
+      } yield {
+        bytes
       }
-    } yield {
-      bytes
+
+      fs2.io
+        .readInputStream(getByteStream, ReadChunkSize, blockingEc)
+        .chunks
+        .attempt
+        .scan(start -> Either.right[Throwable, Chunk[Byte]](Chunk.empty)) {
+          case ((n, _), Right(bytes)) => (n + bytes.size, Right(bytes))
+          case ((n, _), Left(err))    => (n, Left(err))
+        }
+        .flatMap {
+          case (_, Right(bytes)) =>
+            Stream.chunk(bytes)
+          case (n, Left(err: FTPConnectionClosedException)) =>
+            val message = s"Hit connection error while reading $path, retrying"
+            Stream.eval(logger.warn(err)(message)) >> readStream(n)
+          case (_, Left(err)) =>
+            Stream.raiseError[IO](err)
+        }
     }
 
-    val allBytes =
-      fs2.io.readInputStream(getByteStream, ReadChunkSize, blockingEc)
-
+    val allBytes = readStream(fromByte)
     untilByte
       .fold(allBytes)(lastByte => allBytes.take(lastByte - fromByte))
       .handleErrorWith { err =>
@@ -64,23 +89,29 @@ class FtpApi private[ftp] (
     *
     * @param path path within the configured FTP site pointing to the directory-to-list
     */
-  def listDirectory(path: String): Stream[IO, (String, FileType)] =
-    Stream.eval(client.statRemoteFile(path)).flatMap {
+  def listDirectory(path: String): Stream[IO, (String, FileType)] = {
+    val statPath =
+      logger.info(s"Getting info for $path").flatMap(_ => client.statRemoteFile(path))
+
+    Stream.eval(statPath).flatMap {
       case None =>
         Stream.raiseError[IO](
           new RuntimeException(s"Cannot list contents of nonexistent path: $path")
         )
       case Some(pathInfo) =>
         if (pathInfo.isDirectory) {
-          Stream.eval(client.listRemoteDirectory(path)).flatMap(Stream.emits).map {
-            ftpFile =>
-              val tpe = ftpFile.getType match {
-                case FTPFile.FILE_TYPE          => RegularFile
-                case FTPFile.DIRECTORY_TYPE     => Directory
-                case FTPFile.SYMBOLIC_LINK_TYPE => Symlink
-                case _                          => Other
-              }
-              (ftpFile.getName, tpe)
+          val listDir = logger
+            .info(s"Listing contents of $path")
+            .flatMap(_ => client.listRemoteDirectory(path))
+
+          Stream.eval(listDir).flatMap(Stream.emits).map { ftpFile =>
+            val tpe = ftpFile.getType match {
+              case FTPFile.FILE_TYPE          => RegularFile
+              case FTPFile.DIRECTORY_TYPE     => Directory
+              case FTPFile.SYMBOLIC_LINK_TYPE => Symlink
+              case _                          => Other
+            }
+            (ftpFile.getName, tpe)
           }
         } else {
           Stream.raiseError[IO](
@@ -88,6 +119,7 @@ class FtpApi private[ftp] (
           )
         }
     }
+  }
 }
 
 object FtpApi {
