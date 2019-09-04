@@ -4,8 +4,10 @@ import java.io.InputStream
 
 import cats.effect.{ContextShift, IO, Resource}
 import cats.implicits._
-import fs2.Stream
+import fs2.{Chunk, Stream}
+import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
 import net.schmizz.sshj.SSHClient
+import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.sftp.{FileMode, RemoteResourceInfo, SFTPClient}
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 
@@ -24,6 +26,8 @@ class SftpApi private[sftp] (
 )(implicit cs: ContextShift[IO]) {
   import SftpApi._
 
+  private val logger = Slf4jLogger.getLogger[IO]
+
   /**
     * Read a range of bytes (potentially the whole file) from an SFTP file.
     *
@@ -38,9 +42,36 @@ class SftpApi private[sftp] (
     fromByte: Long = 0L,
     untilByte: Option[Long] = None
   ): Stream[IO, Byte] = {
-    val getByteStream = cs.evalOn(blockingEc)(client.openRemoteFile(path, fromByte))
-    val allBytes = fs2.io.readInputStream(getByteStream, ReadChunkSize, blockingEc)
 
+    /*
+     * Helper method used to stream the contents of `path` from a start position.
+     *
+     * If the SSH connection is severed mid-transfer, this method will recursively
+     * retry starting at the last-received byte.
+     */
+    def readStream(start: Long): Stream[IO, Byte] =
+      Stream.eval(logger.info(s"Opening $path at byte $start")) >>
+        Stream.resource(client.openRemoteFile(path, start)).flatMap { inStream =>
+          fs2.io
+            .readInputStream(IO.pure(inStream), ReadChunkSize, blockingEc)
+            .chunks
+            .attempt
+            .scan(start -> Either.right[Throwable, Chunk[Byte]](Chunk.empty)) {
+              case ((n, _), Right(bytes)) => (n + bytes.size, Right(bytes))
+              case ((n, _), Left(err))    => (n, Left(err))
+            }
+            .flatMap {
+              case (_, Right(bytes)) =>
+                Stream.chunk(bytes)
+              case (n, Left(err: SSHException)) =>
+                val message = s"Hit connection error while reading $path, retrying"
+                Stream.eval(logger.warn(err)(message)) >> readStream(n)
+              case (_, Left(err)) =>
+                Stream.raiseError[IO](err)
+            }
+        }
+
+    val allBytes = readStream(fromByte)
     untilByte
       .fold(allBytes)(lastByte => allBytes.take(lastByte - fromByte))
       .handleErrorWith { err =>
@@ -79,7 +110,7 @@ object SftpApi {
   private[sftp] trait Client {
 
     /** Use SFTP to open an input stream for a remote file, starting at an offset. */
-    def openRemoteFile(path: String, offset: Long): IO[InputStream]
+    def openRemoteFile(path: String, offset: Long): Resource[IO, InputStream]
 
     /** Use SFTP to list the contents of a remote directory. */
     def listRemoteDirectory(path: String): IO[List[RemoteResourceInfo]]
@@ -128,22 +159,27 @@ object SftpApi {
     */
   def build(loginInfo: SftpLoginInfo, blockingEc: ExecutionContext)(
     implicit cs: ContextShift[IO]
-  ): Resource[IO, SftpApi] =
-    connectToHost(loginInfo, blockingEc).map { sftp =>
-      val realClient = new Client {
-        override def openRemoteFile(path: String, offset: Long): IO[InputStream] =
-          for {
-            file <- IO.delay(sftp.open(path))
-            // TODO: Configure keep-alive here.
-            inStream <- IO.delay(new file.RemoteFileInputStream(offset))
-          } yield {
-            inStream: InputStream
+  ): Resource[IO, SftpApi] = {
+    /*
+     * NOTE: sshj's client is thread-safe, but long-lived SSH sessions are still
+     * liable to be terminated at any time, so to make our lives easy we create
+     * a new client / connection per request. If we see a ton of overhead, we might
+     * want to investigate maintaining a pool of connected clients.
+     */
+    val realClient = new Client {
+      override def openRemoteFile(path: String, offset: Long): Resource[IO, InputStream] =
+        connectToHost(loginInfo, blockingEc).evalMap { sftp =>
+          cs.evalOn(blockingEc)(IO.delay(sftp.open(path))).map { file =>
+            new file.RemoteFileInputStream(offset)
           }
+        }
 
-        override def listRemoteDirectory(path: String): IO[List[RemoteResourceInfo]] =
+      override def listRemoteDirectory(path: String): IO[List[RemoteResourceInfo]] =
+        connectToHost(loginInfo, blockingEc).use { sftp =>
           IO.delay(sftp.ls(path)).map(_.asScala.toList)
-      }
-
-      new SftpApi(realClient, blockingEc)
+        }
     }
+
+    Resource.pure(new SftpApi(realClient, blockingEc))
+  }
 }

@@ -161,7 +161,8 @@ lazy val `sftp-lib` = project
       "ch.qos.logback" % "logback-classic" % logbackVersion,
       "co.fs2" %% "fs2-core" % fs2Version,
       "co.fs2" %% "fs2-io" % fs2Version,
-      "com.hierynomus" % "sshj" % sshJVersion
+      "com.hierynomus" % "sshj" % sshJVersion,
+      "io.chrisdavenport" %% "log4cats-slf4j" % log4CatsVersion
     ),
     // All tests.
     libraryDependencies ++= Seq(

@@ -1,15 +1,16 @@
 package org.broadinstitute.monster.storage.sftp
 
-import java.io.ByteArrayInputStream
+import java.io.{ByteArrayInputStream, IOException, InputStream}
 
-import cats.effect.{ContextShift, IO}
+import cats.effect.{ContextShift, IO, Resource}
+import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.sftp.{FileAttributes, FileMode, RemoteResourceInfo}
 import org.scalamock.scalatest.MockFactory
-import org.scalatest.{FlatSpec, Matchers}
+import org.scalatest.{EitherValues, FlatSpec, Matchers}
 
 import scala.concurrent.ExecutionContext
 
-class SftpApiSpec extends FlatSpec with Matchers with MockFactory {
+class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValues {
 
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
 
@@ -23,7 +24,7 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory {
     val fakeSftp = mock[SftpApi.Client]
     (fakeSftp.openRemoteFile _)
       .expects(fakePath, 0L)
-      .returning(IO.pure(new ByteArrayInputStream(fakeContents.getBytes())))
+      .returning(Resource.pure(new ByteArrayInputStream(fakeContents.getBytes())))
 
     val api = new SftpApi(fakeSftp, ExecutionContext.global)
     val bytes = api.readFile(fakePath).compile.toChunk.unsafeRunSync()
@@ -38,9 +39,7 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory {
     val fakeSftp = mock[SftpApi.Client]
     (fakeSftp.openRemoteFile _)
       .expects(fakePath, expectedOffset.toLong)
-      .returning {
-        IO.pure(new ByteArrayInputStream(expectedBytes))
-      }
+      .returning(Resource.pure(new ByteArrayInputStream(expectedBytes)))
 
     val api = new SftpApi(fakeSftp, ExecutionContext.global)
     val bytes =
@@ -53,7 +52,7 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory {
     val fakeSftp = mock[SftpApi.Client]
     (fakeSftp.openRemoteFile _)
       .expects(fakePath, 0L)
-      .returning(IO.pure(new ByteArrayInputStream(fakeContents.getBytes())))
+      .returning(Resource.pure(new ByteArrayInputStream(fakeContents.getBytes())))
 
     val api = new SftpApi(fakeSftp, ExecutionContext.global)
     val bytes =
@@ -73,9 +72,7 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory {
     val fakeSftp = mock[SftpApi.Client]
     (fakeSftp.openRemoteFile _)
       .expects(fakePath, expectedOffset)
-      .returning {
-        IO.pure(new ByteArrayInputStream(expectedBytes))
-      }
+      .returning(Resource.pure(new ByteArrayInputStream(expectedBytes)))
 
     val api = new SftpApi(fakeSftp, ExecutionContext.global)
     val bytes =
@@ -86,6 +83,75 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory {
         .unsafeRunSync()
 
     bytes.toArray shouldBe expectedBytes.take(3)
+  }
+
+  it should "resume transfers that fail with an SSH error" in {
+    val expectedOffset = 2
+    val failurePoint = 5
+
+    val inStream1: InputStream = new InputStream {
+      private var nextIndex = expectedOffset
+      override def read(): Int =
+        if (nextIndex == failurePoint) {
+          throw new SSHException("test failure")
+        } else {
+          val toRet = fakeContents.getBytes().apply(nextIndex)
+          nextIndex += 1
+          toRet.toInt
+        }
+    }
+    val inStream2: InputStream = new InputStream {
+      private var nextIndex = failurePoint
+      override def read(): Int =
+        if (nextIndex == fakeContents.length) {
+          -1
+        } else {
+          val toRet = fakeContents.getBytes().apply(nextIndex)
+          nextIndex += 1
+          toRet.toInt
+        }
+    }
+
+    val fakeSftp = mock[SftpApi.Client]
+    (fakeSftp.openRemoteFile _)
+      .expects(fakePath, expectedOffset.toLong)
+      .returning(Resource.pure(inStream1))
+    (fakeSftp.openRemoteFile _)
+      .expects(fakePath, failurePoint.toLong)
+      .returning(Resource.pure(inStream2))
+
+    val api = new SftpApi(fakeSftp, ExecutionContext.global)
+    val bytes = api
+      .readFile(fakePath, fromByte = expectedOffset.toLong, untilByte = Some(7L))
+      .compile
+      .toChunk
+      .unsafeRunSync()
+
+    bytes.toArray shouldBe fakeContents.getBytes().slice(expectedOffset, 7)
+  }
+
+  it should "not resume transfers on non-SSH errors" in {
+    val inStream: InputStream = new InputStream {
+      private var nextIndex = 0
+      override def read(): Int =
+        if (nextIndex == 5) {
+          throw new IOException("test failure")
+        } else {
+          val toRet = fakeContents.getBytes().apply(nextIndex)
+          nextIndex += 1
+          toRet.toInt
+        }
+    }
+
+    val fakeSftp = mock[SftpApi.Client]
+    (fakeSftp.openRemoteFile _)
+      .expects(fakePath, 0L)
+      .returning(Resource.pure(inStream))
+
+    val api = new SftpApi(fakeSftp, ExecutionContext.global)
+    val bytesOrError = api.readFile(fakePath).compile.toChunk.attempt.unsafeRunSync()
+
+    bytesOrError.left.value.getMessage should include(fakePath)
   }
 
   it should "list remote directories" in {
