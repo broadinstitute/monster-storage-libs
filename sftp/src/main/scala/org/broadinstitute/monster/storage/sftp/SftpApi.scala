@@ -2,7 +2,7 @@ package org.broadinstitute.monster.storage.sftp
 
 import java.io.InputStream
 
-import cats.effect.{ContextShift, IO, Resource}
+import cats.effect.{ContextShift, IO, Resource, Timer}
 import cats.implicits._
 import fs2.{Chunk, Stream}
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
@@ -12,6 +12,7 @@ import net.schmizz.sshj.sftp.{FileMode, RemoteResourceInfo, SFTPClient}
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 
 import scala.concurrent.ExecutionContext
+import scala.concurrent.duration._
 import scala.collection.JavaConverters._
 
 /**
@@ -22,8 +23,10 @@ import scala.collection.JavaConverters._
   */
 class SftpApi private[sftp] (
   client: SftpApi.Client,
-  blockingEc: ExecutionContext
-)(implicit cs: ContextShift[IO]) {
+  blockingEc: ExecutionContext,
+  maxRetries: Long,
+  retryDelay: FiniteDuration
+)(implicit cs: ContextShift[IO], t: Timer[IO]) {
   import SftpApi._
 
   private val logger = Slf4jLogger.getLogger[IO]
@@ -49,7 +52,7 @@ class SftpApi private[sftp] (
      * If the SSH connection is severed mid-transfer, this method will recursively
      * retry starting at the last-received byte.
      */
-    def readStream(start: Long): Stream[IO, Byte] =
+    def readStream(start: Long, attemptsSoFar: Long): Stream[IO, Byte] =
       Stream.eval(logger.info(s"Opening $path at byte $start")) >>
         Stream.resource(client.openRemoteFile(path, start)).flatMap { inStream =>
           fs2.io
@@ -63,15 +66,18 @@ class SftpApi private[sftp] (
             .flatMap {
               case (_, Right(bytes)) =>
                 Stream.chunk(bytes)
-              case (n, Left(err: SSHException)) =>
-                val message = s"Hit connection error while reading $path, retrying"
-                Stream.eval(logger.warn(err)(message)) >> readStream(n)
+              case (n, Left(err: SSHException)) if attemptsSoFar < maxRetries =>
+                val message =
+                  s"Hit connection error while reading $path, retrying after $retryDelay"
+                val logAndWait =
+                  logger.warn(err)(message).flatMap(_ => t.sleep(retryDelay))
+                Stream.eval(logAndWait) >> readStream(n, attemptsSoFar + 1)
               case (_, Left(err)) =>
                 Stream.raiseError[IO](err)
             }
         }
 
-    val allBytes = readStream(fromByte)
+    val allBytes = readStream(fromByte, 0L)
     untilByte
       .fold(allBytes)(lastByte => allBytes.take(lastByte - fromByte))
       .handleErrorWith { err =>
@@ -106,6 +112,12 @@ object SftpApi {
   /** Number of bytes to buffer in each chunk of data pulled from remote files. */
   val ReadChunkSize = 8192
 
+  /** Maximum number of times to resume an in-flight transfer on data connection failures. */
+  val DefaultMaxRetries = 10L
+
+  /** Time to sleep between connection attempts when retrying a failed transfer. */
+  val DefaultRetryDelay = 1.second
+
   /** Thin abstraction over sshj's `SFTPClient`, to enable mocking calls in unit tests. */
   private[sftp] trait Client {
 
@@ -131,8 +143,22 @@ object SftpApi {
     Resource.make(sshSetup)(sshTeardown).flatMap { ssh =>
       val sshConnect = cs.evalOn(blockingEc) {
         for {
-          _ <- IO.delay(ssh.connect(loginInfo.host, loginInfo.port))
-          _ <- IO.delay(ssh.authPassword(loginInfo.username, loginInfo.password))
+          _ <- IO.delay(ssh.connect(loginInfo.host, loginInfo.port)).adaptError {
+            case err =>
+              new RuntimeException(
+                s"Failed to connect to ${loginInfo.host} on port ${loginInfo.port}",
+                err
+              )
+          }
+          _ <- IO
+            .delay(ssh.authPassword(loginInfo.username, loginInfo.password))
+            .adaptError {
+              case err =>
+                new RuntimeException(
+                  s"Failed to log into ${loginInfo.host} as ${loginInfo.username}",
+                  err
+                )
+            }
         } yield {
           ssh
         }
@@ -158,7 +184,8 @@ object SftpApi {
     * @param blockingEc execution context the client should use for all blocking I/O
     */
   def build(loginInfo: SftpLoginInfo, blockingEc: ExecutionContext)(
-    implicit cs: ContextShift[IO]
+    implicit cs: ContextShift[IO],
+    t: Timer[IO]
   ): Resource[IO, SftpApi] = {
     /*
      * NOTE: sshj's client is thread-safe, but long-lived SSH sessions are still
@@ -180,6 +207,8 @@ object SftpApi {
         }
     }
 
-    Resource.pure(new SftpApi(realClient, blockingEc))
+    Resource.pure(
+      new SftpApi(realClient, blockingEc, DefaultMaxRetries, DefaultRetryDelay)
+    )
   }
 }

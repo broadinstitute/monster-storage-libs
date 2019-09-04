@@ -1,6 +1,6 @@
 package org.broadinstitute.monster.storage.sftp
 
-import cats.effect.{ContextShift, IO}
+import cats.effect.{ContextShift, IO, Timer}
 import fs2.Stream
 import net.schmizz.sshj.sftp.FileMode
 import org.scalatest.{EitherValues, FlatSpec, Matchers}
@@ -10,6 +10,7 @@ import scala.concurrent.ExecutionContext
 class SftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
 
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
+  private implicit val t: Timer[IO] = IO.timer(ExecutionContext.global)
 
   // FIXME: Change this to point to our own SFTP server once we have one up and running.
   private val testLogin =
@@ -30,11 +31,13 @@ class SftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
     ""
   ).mkString("\r\n")
 
+  def getClient(info: SftpLoginInfo = testLogin): Stream[IO, SftpApi] =
+    Stream.resource(SftpApi.build(info, ExecutionContext.global))
+
   behavior of "SftpApi"
 
   it should "read remote files" in {
-    val bytes = Stream
-      .resource(SftpApi.build(testLogin, ExecutionContext.global))
+    val bytes = getClient()
       .flatMap(_.readFile(testPath))
       .compile
       .toChunk
@@ -43,9 +46,34 @@ class SftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
     new String(bytes.toArray) shouldBe testContent
   }
 
+  it should "raise a useful error if connecting to a remote site fails" in {
+    val badPort = -1
+    val bytesOrError = getClient(testLogin.copy(port = badPort))
+      .flatMap(_.readFile(testPath))
+      .compile
+      .toChunk
+      .attempt
+      .unsafeRunSync()
+
+    bytesOrError.left.value.getCause.getMessage should include(testLogin.host)
+    bytesOrError.left.value.getCause.getMessage should include(badPort.toString)
+  }
+
+  it should "raise a useful error if logging into a remote site fails" in {
+    val badUser = "foouser"
+    val bytesOrError = getClient(testLogin.copy(username = badUser))
+      .flatMap(_.readFile(testPath))
+      .compile
+      .toChunk
+      .attempt
+      .unsafeRunSync()
+
+    bytesOrError.left.value.getCause.getMessage should include(testLogin.host)
+    bytesOrError.left.value.getCause.getMessage should include(badUser)
+  }
+
   it should "read ranges of remote files" in {
-    val bytes = Stream
-      .resource(SftpApi.build(testLogin, ExecutionContext.global))
+    val bytes = getClient()
       .flatMap(_.readFile(testPath, fromByte = 2L, untilByte = Some(7L)))
       .compile
       .toChunk
@@ -56,22 +84,18 @@ class SftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
 
   it should "handle concurrent reads" in {
     val windows = (0L to testContent.length.toLong).sliding(26, 25).toList
-    val bytes =
-      Stream
-        .resource(SftpApi.build(testLogin, ExecutionContext.global))
-        .flatMap { sftp =>
-          Stream.emits(windows).covary[IO].parEvalMap(windows.length) { window =>
-            sftp
-              .readFile(testPath, fromByte = window.head, untilByte = Some(window.last))
-              .compile
-              .toChunk
-          }
-        }
-        .compile
-        .fold(List.empty[Byte]) { (acc, chunk) =>
-          acc ++ chunk.toList
-        }
-        .unsafeRunSync()
+    val bytes = getClient().flatMap { sftp =>
+      Stream.emits(windows).covary[IO].parEvalMap(windows.length) { window =>
+        sftp
+          .readFile(testPath, fromByte = window.head, untilByte = Some(window.last))
+          .compile
+          .toChunk
+      }
+    }.compile
+      .fold(List.empty[Byte]) { (acc, chunk) =>
+        acc ++ chunk.toList
+      }
+      .unsafeRunSync()
 
     new String(bytes.toArray) shouldBe testContent
   }
@@ -79,8 +103,7 @@ class SftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
   it should "raise a useful error when reading a nonexistent remote file" in {
     val fakePath = "foobar"
 
-    val bytesOrError = Stream
-      .resource(SftpApi.build(testLogin, ExecutionContext.global))
+    val bytesOrError = getClient()
       .flatMap(_.readFile(fakePath))
       .compile
       .toChunk
@@ -94,8 +117,7 @@ class SftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
   }
 
   it should "list directories" in {
-    val listed = Stream
-      .resource(SftpApi.build(testLogin, ExecutionContext.global))
+    val listed = getClient()
       .flatMap(_.listDirectory(""))
       .compile
       .toList
@@ -108,8 +130,7 @@ class SftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
   }
 
   it should "preserve full paths when listing" in {
-    val listed = Stream
-      .resource(SftpApi.build(testLogin, ExecutionContext.global))
+    val listed = getClient()
       .flatMap(_.listDirectory("pub/example"))
       .compile
       .toList
@@ -119,8 +140,7 @@ class SftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
   }
 
   it should "raise a useful error when listing a non-directory" in {
-    val listedOrErr = Stream
-      .resource(SftpApi.build(testLogin, ExecutionContext.global))
+    val listedOrErr = getClient()
       .flatMap(_.listDirectory(testPath))
       .compile
       .toChunk

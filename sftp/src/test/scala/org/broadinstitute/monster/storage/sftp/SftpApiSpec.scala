@@ -2,17 +2,19 @@ package org.broadinstitute.monster.storage.sftp
 
 import java.io.{ByteArrayInputStream, IOException, InputStream}
 
-import cats.effect.{ContextShift, IO, Resource}
+import cats.effect.{ContextShift, IO, Resource, Timer}
 import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.sftp.{FileAttributes, FileMode, RemoteResourceInfo}
 import org.scalamock.scalatest.MockFactory
 import org.scalatest.{EitherValues, FlatSpec, Matchers}
 
 import scala.concurrent.ExecutionContext
+import scala.concurrent.duration.Duration
 
 class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValues {
 
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
+  private implicit val t: Timer[IO] = IO.timer(ExecutionContext.global)
 
   private val fakeDir = "some/path/to/some"
   private val fakePath = s"$fakeDir/file"
@@ -26,7 +28,7 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherVal
       .expects(fakePath, 0L)
       .returning(Resource.pure(new ByteArrayInputStream(fakeContents.getBytes())))
 
-    val api = new SftpApi(fakeSftp, ExecutionContext.global)
+    val api = new SftpApi(fakeSftp, ExecutionContext.global, 0L, Duration.Zero)
     val bytes = api.readFile(fakePath).compile.toChunk.unsafeRunSync()
 
     bytes.toArray shouldBe fakeContents.getBytes()
@@ -41,7 +43,7 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherVal
       .expects(fakePath, expectedOffset.toLong)
       .returning(Resource.pure(new ByteArrayInputStream(expectedBytes)))
 
-    val api = new SftpApi(fakeSftp, ExecutionContext.global)
+    val api = new SftpApi(fakeSftp, ExecutionContext.global, 0L, Duration.Zero)
     val bytes =
       api.readFile(fakePath, expectedOffset.toLong).compile.toChunk.unsafeRunSync()
 
@@ -54,7 +56,7 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherVal
       .expects(fakePath, 0L)
       .returning(Resource.pure(new ByteArrayInputStream(fakeContents.getBytes())))
 
-    val api = new SftpApi(fakeSftp, ExecutionContext.global)
+    val api = new SftpApi(fakeSftp, ExecutionContext.global, 0L, Duration.Zero)
     val bytes =
       api
         .readFile(fakePath, untilByte = Some(3L))
@@ -74,7 +76,7 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherVal
       .expects(fakePath, expectedOffset)
       .returning(Resource.pure(new ByteArrayInputStream(expectedBytes)))
 
-    val api = new SftpApi(fakeSftp, ExecutionContext.global)
+    val api = new SftpApi(fakeSftp, ExecutionContext.global, 0L, Duration.Zero)
     val bytes =
       api
         .readFile(fakePath, expectedOffset.toLong, untilByte = Some(5L))
@@ -120,7 +122,7 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherVal
       .expects(fakePath, failurePoint.toLong)
       .returning(Resource.pure(inStream2))
 
-    val api = new SftpApi(fakeSftp, ExecutionContext.global)
+    val api = new SftpApi(fakeSftp, ExecutionContext.global, 1L, Duration.Zero)
     val bytes = api
       .readFile(fakePath, fromByte = expectedOffset.toLong, untilByte = Some(7L))
       .compile
@@ -148,8 +150,44 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherVal
       .expects(fakePath, 0L)
       .returning(Resource.pure(inStream))
 
-    val api = new SftpApi(fakeSftp, ExecutionContext.global)
+    val api = new SftpApi(fakeSftp, ExecutionContext.global, 1L, Duration.Zero)
     val bytesOrError = api.readFile(fakePath).compile.toChunk.attempt.unsafeRunSync()
+
+    bytesOrError.left.value.getMessage should include(fakePath)
+  }
+
+  it should "enforce an upper bound on the number of retries" in {
+    val expectedOffset = 2
+    val failurePoint = 5
+
+    val inStream1: InputStream = new InputStream {
+      private var nextIndex = expectedOffset
+
+      override def read(): Int =
+        if (nextIndex == failurePoint) {
+          throw new SSHException("test failure")
+        } else {
+          val toRet = fakeContents.getBytes().apply(nextIndex)
+          nextIndex += 1
+          toRet.toInt
+        }
+    }
+
+    val fakeSftp = mock[SftpApi.Client]
+    (fakeSftp.openRemoteFile _)
+      .expects(fakePath, expectedOffset.toLong)
+      .returning(Resource.pure(inStream1))
+    (fakeSftp.openRemoteFile _)
+      .expects(fakePath, failurePoint.toLong)
+      .returning(Resource.pure(inStream1))
+
+    val api = new SftpApi(fakeSftp, ExecutionContext.global, 1L, Duration.Zero)
+    val bytesOrError = api
+      .readFile(fakePath, fromByte = expectedOffset.toLong)
+      .compile
+      .toChunk
+      .attempt
+      .unsafeRunSync()
 
     bytesOrError.left.value.getMessage should include(fakePath)
   }
@@ -173,7 +211,7 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherVal
       }
     }
 
-    val api = new SftpApi(fakeSftp, ExecutionContext.global)
+    val api = new SftpApi(fakeSftp, ExecutionContext.global, 0L, Duration.Zero)
     val contents = api.listDirectory(fakeDir).compile.toList.unsafeRunSync()
     contents should contain theSameElementsAs expected
   }
@@ -181,7 +219,7 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherVal
   it should "not break if listing an empty directory" in {
     val fakeSftp = mock[SftpApi.Client]
     (fakeSftp.listRemoteDirectory _).expects(fakeDir).returning(IO.pure(Nil))
-    val api = new SftpApi(fakeSftp, ExecutionContext.global)
+    val api = new SftpApi(fakeSftp, ExecutionContext.global, 0L, Duration.Zero)
     val contents = api.listDirectory(fakeDir).compile.toList.unsafeRunSync()
     contents shouldBe empty
   }
