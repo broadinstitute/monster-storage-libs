@@ -111,6 +111,38 @@ class FtpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
     new String(bytes.toArray) shouldBe testContent
   }
 
+  it should "raise a useful error if connecting to a remote site fails" in {
+    val badPort = -1
+    val bytesOrError = Stream
+      .resource(
+        FtpApi.build(testInfo.copy(port = badPort), ExecutionContext.global)
+      )
+      .flatMap(_.readFile(testPath))
+      .compile
+      .toChunk
+      .attempt
+      .unsafeRunSync()
+
+    bytesOrError.left.value.getCause.getMessage should include(testInfo.host)
+    bytesOrError.left.value.getCause.getMessage should include(badPort.toString)
+  }
+
+  it should "raise a useful error if logging into a remote site fails" in {
+    val badUser = "foouser"
+    val bytesOrError = Stream
+      .resource(
+        FtpApi.build(testInfo.copy(username = badUser), ExecutionContext.global)
+      )
+      .flatMap(_.readFile(testPath))
+      .compile
+      .toChunk
+      .attempt
+      .unsafeRunSync()
+
+    bytesOrError.left.value.getCause.getMessage should include(testInfo.host)
+    bytesOrError.left.value.getCause.getMessage should include(badUser.toString)
+  }
+
   it should "read ranges of remote files" in {
     val bytes = Stream
       .resource(FtpApi.build(testInfo, ExecutionContext.global))

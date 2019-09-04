@@ -184,6 +184,12 @@ object FtpApi {
         client.addProtocolCommandListener(FtpEventLogger)
         client.connect(connectionInfo.host, connectionInfo.port)
         client
+      }.adaptError {
+        case err =>
+          new RuntimeException(
+            s"Failed to connect to ${connectionInfo.host} on port ${connectionInfo.port}",
+            err
+          )
       }
     }
     val teardown = (ftp: FTPClient) => cs.evalOn(blockingEc)(IO.delay(ftp.disconnect()))
