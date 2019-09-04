@@ -1,6 +1,6 @@
 package org.broadinstitute.monster.storage.ftp
 
-import cats.effect.{ContextShift, IO}
+import cats.effect.{ContextShift, IO, Timer}
 import fs2.Stream
 import org.scalatest.{EitherValues, FlatSpec, Matchers}
 
@@ -9,6 +9,7 @@ import scala.concurrent.ExecutionContext
 class FtpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
 
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
+  private implicit val t: Timer[IO] = IO.timer(ExecutionContext.global)
 
   // FIXME: Change this to point to our own FTP server once we have one up and running.
   // NCBI's site is maddeningly slow, you probably want to take a break once you launch these tests...
@@ -98,97 +99,6 @@ class FtpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
        |be careful!
        |""".stripMargin
 
-  behavior of "FtpApi"
-
-  it should "read remote files" in {
-    val bytes = Stream
-      .resource(FtpApi.build(testInfo, ExecutionContext.global))
-      .flatMap(_.readFile(testPath))
-      .compile
-      .toChunk
-      .unsafeRunSync()
-
-    new String(bytes.toArray) shouldBe testContent
-  }
-
-  it should "raise a useful error if connecting to a remote site fails" in {
-    val badPort = -1
-    val bytesOrError = Stream
-      .resource(
-        FtpApi.build(testInfo.copy(port = badPort), ExecutionContext.global)
-      )
-      .flatMap(_.readFile(testPath))
-      .compile
-      .toChunk
-      .attempt
-      .unsafeRunSync()
-
-    bytesOrError.left.value.getCause.getMessage should include(testInfo.host)
-    bytesOrError.left.value.getCause.getMessage should include(badPort.toString)
-  }
-
-  it should "raise a useful error if logging into a remote site fails" in {
-    val badUser = "foouser"
-    val bytesOrError = Stream
-      .resource(
-        FtpApi.build(testInfo.copy(username = badUser), ExecutionContext.global)
-      )
-      .flatMap(_.readFile(testPath))
-      .compile
-      .toChunk
-      .attempt
-      .unsafeRunSync()
-
-    bytesOrError.left.value.getCause.getMessage should include(testInfo.host)
-    bytesOrError.left.value.getCause.getMessage should include(badUser.toString)
-  }
-
-  it should "read ranges of remote files" in {
-    val bytes = Stream
-      .resource(FtpApi.build(testInfo, ExecutionContext.global))
-      .flatMap(_.readFile(testPath, fromByte = 27L, untilByte = Some(200L)))
-      .compile
-      .toChunk
-      .unsafeRunSync()
-
-    new String(bytes.toArray) shouldBe testContent.slice(27, 200)
-  }
-
-  it should "handle concurrent reads" in {
-    val windows = (0L to testContent.length.toLong).sliding(251, 250).toList
-    val bytes = Stream
-      .resource(FtpApi.build(testInfo, ExecutionContext.global))
-      .flatMap { ftp =>
-        Stream.emits(windows).covary[IO].parEvalMap(windows.length) { window =>
-          ftp
-            .readFile(testPath, fromByte = window.head, untilByte = Some(window.last))
-            .compile
-            .toChunk
-        }
-      }
-      .compile
-      .fold(List.empty[Byte]) { (acc, chunk) =>
-        acc ++ chunk.toList
-      }
-      .unsafeRunSync()
-
-    new String(bytes.toArray) shouldBe testContent
-  }
-
-  it should "raise a useful error when reading a nonexistent remote file" in {
-    val fakePath = "foobar"
-
-    val bytesOrError = Stream
-      .resource(FtpApi.build(testInfo, ExecutionContext.global))
-      .flatMap(_.readFile(fakePath))
-      .compile
-      .toChunk
-      .attempt
-      .unsafeRunSync()
-
-    bytesOrError.left.value.getMessage should include(fakePath)
-  }
-
   private val testDir = "pub/clinvar"
   private val testDirContents = List(
     "ClinGen" -> FtpApi.Directory,
@@ -212,9 +122,90 @@ class FtpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
   )
   private val testEmptyDir = "pub/README"
 
+  private def getClient(info: FtpConnectionInfo = testInfo): Stream[IO, FtpApi] =
+    Stream.resource(FtpApi.build(info, ExecutionContext.global))
+
+  behavior of "FtpApi"
+
+  it should "read remote files" in {
+    val bytes = getClient()
+      .flatMap(_.readFile(testPath))
+      .compile
+      .toChunk
+      .unsafeRunSync()
+
+    new String(bytes.toArray) shouldBe testContent
+  }
+
+  it should "raise a useful error if connecting to a remote site fails" in {
+    val badPort = -1
+    val bytesOrError = getClient(testInfo.copy(port = badPort))
+      .flatMap(_.readFile(testPath))
+      .compile
+      .toChunk
+      .attempt
+      .unsafeRunSync()
+
+    bytesOrError.left.value.getCause.getMessage should include(testInfo.host)
+    bytesOrError.left.value.getCause.getMessage should include(badPort.toString)
+  }
+
+  it should "raise a useful error if logging into a remote site fails" in {
+    val badUser = "foouser"
+    val bytesOrError = getClient(testInfo.copy(username = badUser))
+      .flatMap(_.readFile(testPath))
+      .compile
+      .toChunk
+      .attempt
+      .unsafeRunSync()
+
+    bytesOrError.left.value.getCause.getMessage should include(testInfo.host)
+    bytesOrError.left.value.getCause.getMessage should include(badUser.toString)
+  }
+
+  it should "read ranges of remote files" in {
+    val bytes = getClient()
+      .flatMap(_.readFile(testPath, fromByte = 27L, untilByte = Some(200L)))
+      .compile
+      .toChunk
+      .unsafeRunSync()
+
+    new String(bytes.toArray) shouldBe testContent.slice(27, 200)
+  }
+
+  it should "handle concurrent reads" in {
+    val windows = (0L to testContent.length.toLong).sliding(251, 250).toList
+    val bytes = getClient().flatMap { ftp =>
+      Stream.emits(windows).covary[IO].parEvalMap(windows.length) { window =>
+        ftp
+          .readFile(testPath, fromByte = window.head, untilByte = Some(window.last))
+          .compile
+          .toChunk
+      }
+    }.compile
+      .fold(List.empty[Byte]) { (acc, chunk) =>
+        acc ++ chunk.toList
+      }
+      .unsafeRunSync()
+
+    new String(bytes.toArray) shouldBe testContent
+  }
+
+  it should "raise a useful error when reading a nonexistent remote file" in {
+    val fakePath = "foobar"
+
+    val bytesOrError = getClient()
+      .flatMap(_.readFile(fakePath))
+      .compile
+      .toChunk
+      .attempt
+      .unsafeRunSync()
+
+    bytesOrError.left.value.getMessage should include(fakePath)
+  }
+
   it should "list remote directories" in {
-    val contents = Stream
-      .resource(FtpApi.build(testInfo, ExecutionContext.global))
+    val contents = getClient()
       .flatMap(_.listDirectory(testDir))
       .compile
       .toList
@@ -224,8 +215,7 @@ class FtpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
   }
 
   it should "not crash on listing empty directories" in {
-    val contents = Stream
-      .resource(FtpApi.build(testInfo, ExecutionContext.global))
+    val contents = getClient()
       .flatMap(_.listDirectory(testEmptyDir))
       .compile
       .toList
@@ -235,22 +225,20 @@ class FtpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
   }
 
   it should "raise a helpful error if listing a nonexistent directory" in {
-    val fakePath = "foobar"
+    val fakeDir = "foobar"
 
-    val contentsOrError = Stream
-      .resource(FtpApi.build(testInfo, ExecutionContext.global))
-      .flatMap(_.listDirectory(fakePath))
+    val contentsOrError = getClient()
+      .flatMap(_.listDirectory(fakeDir))
       .compile
       .toList
       .attempt
       .unsafeRunSync()
 
-    contentsOrError.left.value.getMessage should include(fakePath)
+    contentsOrError.left.value.getMessage should include(fakeDir)
   }
 
   it should "raise a helpful error if listing a non-directory" in {
-    val contentsOrError = Stream
-      .resource(FtpApi.build(testInfo, ExecutionContext.global))
+    val contentsOrError = getClient()
       .flatMap(_.listDirectory(testPath))
       .compile
       .toList

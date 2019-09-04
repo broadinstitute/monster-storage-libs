@@ -2,13 +2,14 @@ package org.broadinstitute.monster.storage.ftp
 
 import java.io.InputStream
 
-import cats.effect.{ContextShift, IO, Resource}
+import cats.effect.{ContextShift, IO, Resource, Timer}
 import cats.implicits._
 import fs2.{Chunk, Stream}
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
 import org.apache.commons.net.ftp._
 
 import scala.concurrent.ExecutionContext
+import scala.concurrent.duration._
 
 /**
   * Client which can perform I/O operations against an FTP site.
@@ -18,8 +19,10 @@ import scala.concurrent.ExecutionContext
   */
 class FtpApi private[ftp] (
   client: FtpApi.Client,
-  blockingEc: ExecutionContext
-)(implicit cs: ContextShift[IO]) {
+  blockingEc: ExecutionContext,
+  maxRetries: Long,
+  retryDelay: FiniteDuration
+)(implicit cs: ContextShift[IO], t: Timer[IO]) {
   import FtpApi._
 
   private val logger = Slf4jLogger.getLogger[IO]
@@ -45,7 +48,7 @@ class FtpApi private[ftp] (
      * If the data connection is severed by the server mid-transfer, this method
      * will recursively retry starting at the last-received byte.
      */
-    def readStream(start: Long): Stream[IO, Byte] = {
+    def readStream(start: Long, attemptsSoFar: Long): Stream[IO, Byte] = {
       val getByteStream = for {
         _ <- logger.info(s"Opening $path at byte $start")
         bytes <- client.openRemoteFile(path, start).use {
@@ -67,15 +70,18 @@ class FtpApi private[ftp] (
         .flatMap {
           case (_, Right(bytes)) =>
             Stream.chunk(bytes)
-          case (n, Left(err: FTPConnectionClosedException)) =>
-            val message = s"Hit connection error while reading $path, retrying"
-            Stream.eval(logger.warn(err)(message)) >> readStream(n)
+          case (n, Left(err: FTPConnectionClosedException))
+              if attemptsSoFar < maxRetries =>
+            val message =
+              s"Hit connection error while reading $path, retrying after $retryDelay"
+            val logAndWait = logger.warn(err)(message).flatMap(_ => t.sleep(retryDelay))
+            Stream.eval(logAndWait) >> readStream(n, attemptsSoFar + 1)
           case (_, Left(err)) =>
             Stream.raiseError[IO](err)
         }
     }
 
-    val allBytes = readStream(fromByte)
+    val allBytes = readStream(fromByte, 0L)
     untilByte
       .fold(allBytes)(lastByte => allBytes.take(lastByte - fromByte))
       .handleErrorWith { err =>
@@ -105,13 +111,13 @@ class FtpApi private[ftp] (
             .flatMap(_ => client.listRemoteDirectory(path))
 
           Stream.eval(listDir).flatMap(Stream.emits).map { ftpFile =>
-            val tpe = ftpFile.getType match {
+            val fileType = ftpFile.getType match {
               case FTPFile.FILE_TYPE          => RegularFile
               case FTPFile.DIRECTORY_TYPE     => Directory
               case FTPFile.SYMBOLIC_LINK_TYPE => Symlink
               case _                          => Other
             }
-            (ftpFile.getName, tpe)
+            (ftpFile.getName, fileType)
           }
         } else {
           Stream.raiseError[IO](
@@ -136,6 +142,12 @@ object FtpApi {
     * This value is recommended in the README.ftp files scattered around the ClinVar site.
     */
   val ClientBufferSize = 32 * bytesPerMib
+
+  /** Maximum number of times to resume an in-flight transfer on data connection failures. */
+  val DefaultMaxRetries = 10L
+
+  /** Time to sleep between connection attempts when retrying a failed transfer. */
+  val DefaultRetryDelay = 1.second
 
   /** Thin abstraction over commons-net's `FTPClient`, to enable mocking calls in unit tests. */
   private[ftp] trait Client {
@@ -253,7 +265,7 @@ object FtpApi {
   def build(
     connectionInfo: FtpConnectionInfo,
     blockingEc: ExecutionContext
-  )(implicit cs: ContextShift[IO]): Resource[IO, FtpApi] = {
+  )(implicit cs: ContextShift[IO], t: Timer[IO]): Resource[IO, FtpApi] = {
     val realClient = new Client {
       override def openRemoteFile(
         path: String,
@@ -298,6 +310,8 @@ object FtpApi {
         }
     }
 
-    Resource.pure(new FtpApi(realClient, blockingEc))
+    Resource.pure(
+      new FtpApi(realClient, blockingEc, DefaultMaxRetries, DefaultRetryDelay)
+    )
   }
 }
