@@ -7,6 +7,7 @@ import cats.implicits._
 import fs2.{Chunk, Stream}
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
 import org.apache.commons.net.ftp._
+import org.broadinstitute.monster.storage.common.FileType
 
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
@@ -112,10 +113,10 @@ class FtpApi private[ftp] (
 
           Stream.eval(listDir).flatMap(Stream.emits).map { ftpFile =>
             val fileType = ftpFile.getType match {
-              case FTPFile.FILE_TYPE          => RegularFile
-              case FTPFile.DIRECTORY_TYPE     => Directory
-              case FTPFile.SYMBOLIC_LINK_TYPE => Symlink
-              case _                          => Other
+              case FTPFile.FILE_TYPE          => FileType.File
+              case FTPFile.DIRECTORY_TYPE     => FileType.Directory
+              case FTPFile.SYMBOLIC_LINK_TYPE => FileType.Symlink
+              case _                          => FileType.Other
             }
             (ftpFile.getName, fileType)
           }
@@ -167,19 +168,6 @@ object FtpApi {
     /** Use FTP to list the contents of a remote directory. */
     def listRemoteDirectory(path: String): IO[List[FTPFile]]
   }
-
-  /**
-    * Enum representation of FTP file types.
-    *
-    * TODO: This representation isn't bound to FTP. It'd probably be worth breaking
-    * out a new 'common' project to hold its definition, and then have each lib adapt
-    * their specific methods to use it.
-    */
-  sealed trait FileType
-  case object RegularFile extends FileType
-  case object Directory extends FileType
-  case object Symlink extends FileType
-  case object Other extends FileType
 
   /**
     * Build a resource which will connect to a remote FTP site, authenticate with the site,

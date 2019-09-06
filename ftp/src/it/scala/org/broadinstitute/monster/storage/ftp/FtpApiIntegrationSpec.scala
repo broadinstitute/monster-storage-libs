@@ -2,6 +2,7 @@ package org.broadinstitute.monster.storage.ftp
 
 import cats.effect.{ContextShift, IO, Timer}
 import fs2.Stream
+import org.broadinstitute.monster.storage.common.FileType
 import org.scalatest.{EitherValues, FlatSpec, Matchers}
 
 import scala.concurrent.ExecutionContext
@@ -101,24 +102,24 @@ class FtpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
 
   private val testDir = "pub/clinvar"
   private val testDirContents = List(
-    "ClinGen" -> FtpApi.Directory,
-    "ConceptID_history.txt" -> FtpApi.RegularFile,
-    "README.txt" -> FtpApi.RegularFile,
-    "README_VCF.txt" -> FtpApi.RegularFile,
-    "clinvar_public.xsd" -> FtpApi.Symlink,
-    "clinvar_submission.xsd" -> FtpApi.Symlink,
-    "disease_names" -> FtpApi.RegularFile,
-    "document_archives" -> FtpApi.Directory,
-    "gene_condition_source_id" -> FtpApi.RegularFile,
-    "presentations" -> FtpApi.Directory,
-    "release_notes" -> FtpApi.Directory,
-    "submission_templates" -> FtpApi.Directory,
-    "tab_delimited" -> FtpApi.Directory,
-    "vcf_GRCh37" -> FtpApi.Directory,
-    "vcf_GRCh38" -> FtpApi.Directory,
-    "xml" -> FtpApi.Directory,
-    "xsd_public" -> FtpApi.Directory,
-    "xsd_submission" -> FtpApi.Directory
+    "ClinGen" -> FileType.Directory,
+    "ConceptID_history.txt" -> FileType.File,
+    "README.txt" -> FileType.File,
+    "README_VCF.txt" -> FileType.File,
+    "clinvar_public.xsd" -> FileType.Symlink,
+    "clinvar_submission.xsd" -> FileType.Symlink,
+    "disease_names" -> FileType.File,
+    "document_archives" -> FileType.Directory,
+    "gene_condition_source_id" -> FileType.File,
+    "presentations" -> FileType.Directory,
+    "release_notes" -> FileType.Directory,
+    "submission_templates" -> FileType.Directory,
+    "tab_delimited" -> FileType.Directory,
+    "vcf_GRCh37" -> FileType.Directory,
+    "vcf_GRCh38" -> FileType.Directory,
+    "xml" -> FileType.Directory,
+    "xsd_public" -> FileType.Directory,
+    "xsd_submission" -> FileType.Directory
   )
   private val testEmptyDir = "pub/README"
 

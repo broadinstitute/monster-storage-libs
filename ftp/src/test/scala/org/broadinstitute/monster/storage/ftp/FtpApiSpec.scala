@@ -4,6 +4,7 @@ import java.io.{ByteArrayInputStream, IOException, InputStream}
 
 import cats.effect.{ContextShift, IO, Resource, Timer}
 import org.apache.commons.net.ftp.{FTPConnectionClosedException, FTPFile}
+import org.broadinstitute.monster.storage.common.FileType
 import org.scalamock.scalatest.MockFactory
 import org.scalatest.{EitherValues, FlatSpec, Matchers}
 
@@ -219,10 +220,10 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
 
     contents shouldBe List.tabulate(10) { i =>
       val expectedType = (i % 4) match {
-        case FTPFile.DIRECTORY_TYPE     => FtpApi.Directory
-        case FTPFile.FILE_TYPE          => FtpApi.RegularFile
-        case FTPFile.SYMBOLIC_LINK_TYPE => FtpApi.Symlink
-        case _                          => FtpApi.Other
+        case FTPFile.DIRECTORY_TYPE     => FileType.Directory
+        case FTPFile.FILE_TYPE          => FileType.File
+        case FTPFile.SYMBOLIC_LINK_TYPE => FileType.Symlink
+        case _                          => FileType.Other
       }
       s"file-$i" -> expectedType
     }

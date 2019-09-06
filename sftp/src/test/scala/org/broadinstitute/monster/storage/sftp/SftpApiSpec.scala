@@ -5,6 +5,7 @@ import java.io.{ByteArrayInputStream, IOException, InputStream}
 import cats.effect.{ContextShift, IO, Resource, Timer}
 import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.sftp.{FileAttributes, FileMode, RemoteResourceInfo}
+import org.broadinstitute.monster.storage.common.FileType
 import org.scalamock.scalatest.MockFactory
 import org.scalatest.{EitherValues, FlatSpec, Matchers}
 
@@ -193,12 +194,12 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherVal
   }
 
   it should "list remote directories" in {
-    val expected =
+    val fakeContents =
       List(fakePath -> FileMode.Type.REGULAR, s"$fakeDir/dir" -> FileMode.Type.DIRECTORY)
     val fakeSftp = mock[SftpApi.Client]
     (fakeSftp.listRemoteDirectory _).expects(fakeDir).returning {
       IO.pure {
-        expected.map {
+        fakeContents.map {
           case (name, tpe) =>
             val attrs = new FileAttributes.Builder().withType(tpe).build()
 
@@ -213,7 +214,10 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherVal
 
     val api = new SftpApi(fakeSftp, ExecutionContext.global, 0L, Duration.Zero)
     val contents = api.listDirectory(fakeDir).compile.toList.unsafeRunSync()
-    contents should contain theSameElementsAs expected
+    contents should contain theSameElementsAs List(
+      fakePath -> FileType.File,
+      s"$fakeDir/dir" -> FileType.Directory
+    )
   }
 
   it should "not break if listing an empty directory" in {

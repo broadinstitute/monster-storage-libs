@@ -2,7 +2,7 @@ package org.broadinstitute.monster.storage.sftp
 
 import cats.effect.{ContextShift, IO, Timer}
 import fs2.Stream
-import net.schmizz.sshj.sftp.FileMode
+import org.broadinstitute.monster.storage.common.FileType
 import org.scalatest.{EitherValues, FlatSpec, Matchers}
 
 import scala.concurrent.ExecutionContext
@@ -124,8 +124,8 @@ class SftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
       .unsafeRunSync()
 
     listed should contain allElementsOf List(
-      "pub" -> FileMode.Type.DIRECTORY,
-      "readme.txt" -> FileMode.Type.REGULAR
+      "pub" -> FileType.Directory,
+      "readme.txt" -> FileType.File
     )
   }
 
@@ -136,7 +136,7 @@ class SftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
       .toList
       .unsafeRunSync()
 
-    listed should contain(testPath -> FileMode.Type.REGULAR)
+    listed should contain(testPath -> FileType.File)
   }
 
   it should "raise a useful error when listing a non-directory" in {
