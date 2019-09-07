@@ -778,4 +778,32 @@ class GcsApiIntegrationSpec
       withClient(_.listContents(bucket, "foo", 10).compile.toList.attempt).unsafeRunSync()
     contentsOrError.left.value.getMessage should include("foo")
   }
+
+  it should "copy objects in cloud storage" in {
+    val checks = for {
+      bodyChunk <- bodyText(2L * GcsApi.ChunkSize).compile.toChunk
+      copiedBytes <- writeTestFile(bodyChunk).use { blob =>
+        val copyTarget = s"copied/${blob.getName}"
+        for {
+          _ <- withClient(
+            _.copyObject(
+              sourceBucket = bucket,
+              sourcePath = blob.getName,
+              targetBucket = bucket,
+              targetPath = copyTarget,
+              forceCompletion = true,
+              prevToken = None
+            )
+          )
+          bytes <- IO.delay(new String(gcsClient.get(bucket, copyTarget).getContent()))
+          _ <- IO.delay(gcsClient.delete(bucket, copyTarget))
+        } yield {
+          bytes
+        }
+      }
+      _ <- IO.delay(copiedBytes shouldBe new String(bodyChunk.toArray))
+    } yield ()
+
+    checks.unsafeRunSync()
+  }
 }

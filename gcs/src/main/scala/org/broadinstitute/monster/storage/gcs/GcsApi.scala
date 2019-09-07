@@ -165,6 +165,20 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
       }
     }
 
+  /**
+    * Create a new object in GCS.
+    *
+    * The method used to create the new object will differ depending on the total
+    * number of bytes expected in the data stream, according to GCS recommendations.
+    *
+    * @param bucket the GCS bucket to create the new object within
+    * @param path location in `bucket` where the new object should be created
+    * @param contentType HTTP content-type of the bytes in `data`
+    * @param expectedSize total number of bytes expected to be contained in `data`
+    * @param expectedMd5 expected MD5 hash of the bytes in `data`. If given, server-side
+    *                    validation will be enabled on the upload
+    * @param data bytes to write into the new file
+    */
   def createObject(
     bucket: String,
     path: String,
@@ -531,6 +545,73 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
         case Some((first, rest)) => rest.cons1(first).pull.echo
       }
       .stream
+
+  /**
+    * Copy a GCS object to another GCS path.
+    *
+    * Uses Google's more efficient "rewrite" API which shuffles bytes on their backend
+    * instead of transferring them through the client. NOTE: This still might not copy
+    * all bytes in a single request.
+    *
+    * @param sourceBucket GCS bucket containing the file to copy
+    * @param sourcePath path within `sourceBucket` pointing to the file-to-copy
+    * @param targetBucket GCS bucket to copy the file into
+    * @param targetPath path within `targetBucket` where the copy should be written
+    * @param forceCompletion if true, HTTP requests will be issued until the copy
+    *                        operation is complete. Otherwise the return value will
+    *                        depend on whether or not the initial HTTP request completed
+    *                        the entire transfer
+    * @param prevToken rewrite ID returned by a previous call to this method. If given,
+    *                  the existing rewrite operation will be continued
+    */
+  def copyObject(
+    sourceBucket: String,
+    sourcePath: String,
+    targetBucket: String,
+    targetPath: String,
+    forceCompletion: Boolean,
+    prevToken: Option[String]
+  ): IO[Either[String, Unit]] =
+    Stream
+      .unfoldEval(Option(prevToken)) {
+        case Some(rewriteId) =>
+          val request = Request[IO](
+            method = Method.POST,
+            uri =
+              rewriteUri(sourceBucket, sourcePath, targetBucket, targetPath, rewriteId)
+          )
+
+          runHttp(request).use { response =>
+            if (response.status.isSuccess) {
+              response.body.compile.toChunk.flatMap { byteChunk =>
+                val next = for {
+                  copyResponse <- parser.parseByteBuffer(byteChunk.toByteBuffer)
+                  nextToken <- copyResponse.hcursor.get[Option[String]](CopyTokenKey)
+                } yield {
+                  nextToken match {
+                    case None => Some(Right(()) -> None)
+                    case Some(token) =>
+                      if (forceCompletion) {
+                        Some(Left(token) -> Option(Option(token)))
+                      } else {
+                        Some(Left(token) -> None)
+                      }
+                  }
+                }
+
+                next.liftTo[IO]
+              }
+            } else {
+              reportError(
+                response,
+                s"Failed to copy $sourcePath in $sourceBucket to $targetPath in $targetBucket"
+              )
+            }
+          }
+        case None => IO.pure(None)
+      }
+      .compile
+      .lastOrError
 }
 
 object GcsApi {
@@ -620,6 +701,7 @@ object GcsApi {
     */
   val MaxBytesPerUploadRequest: Long = 5L * bytesPerMib
 
+  /** Multipart sub-type to include in Content-Type headers of GCS multipart upload requests. */
   val MultipartUploadSubtype = "related"
 
   /**
@@ -666,6 +748,9 @@ object GcsApi {
 
   /** Key which stores the token for the next page of results in responses to GCS "list objects" commands.  */
   val ListTokenKey: String = "nextPageToken"
+
+  /** Key which stores the token for transferring the next set of bytes in responses to GCS "rewrite" commands. */
+  val CopyTokenKey: String = "rewriteToken"
 
   /**
     * Status code returned by GCS when a request to upload bytes to a resumable
@@ -737,6 +822,18 @@ object GcsApi {
   private[gcs] def resumableUploadUri(bucket: String, id: Option[String]): Uri = {
     val base = (GcsUploadUri / bucket / "o").withQueryParam("uploadType", "resumable")
     id.fold(base)(base.withQueryParam("upload_id", _))
+  }
+
+  /** Build a URI which, when POST-ed to, will create / continue a copy operation. */
+  private[gcs] def rewriteUri(
+    sourceBucket: String,
+    sourcePath: String,
+    targetBucket: String,
+    targetPath: String,
+    id: Option[String]
+  ): Uri = {
+    val base = GcsReferenceUri / sourceBucket / "o" / sourcePath / "rewriteTo" / "b" / targetBucket / "o" / targetPath
+    id.fold(base)(base.withQueryParam("rewriteToken", _))
   }
 
   /**
