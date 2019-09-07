@@ -19,12 +19,12 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   private val uploadToken = "upload-token"
   private val smallChunkSize = 16
 
-  private val readObjectURI = baseGcsUri(bucket, path, "alt" -> "media")
-  private val statObjectURI = baseGcsUri(bucket, path, "alt" -> "json")
-  private val createObjectOneShotURI = baseGcsUploadUri(bucket, "multipart")
-  private val initResumableUploadURI = baseGcsUploadUri(bucket, "resumable")
-  private val uploadURI =
-    baseGcsUploadUri(bucket, "resumable").withQueryParam("upload_id", uploadToken)
+  private val objectURI = objectUri(bucket, path)
+  private val readObjectURI = objectDataUri(bucket, path)
+  private val statObjectURI = objectMetadataUri(bucket, path)
+  private val createObjectOneShotURI = multipartUploadUri(bucket)
+  private val initResumableUploadURI = resumableUploadUri(bucket, None)
+  private val uploadURI = resumableUploadUri(bucket, Some(uploadToken))
 
   private val acceptEncodingHeader = Header("Accept-Encoding", "identity, gzip")
 
@@ -457,7 +457,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     it should description in {
       val api = new GcsApi(req => {
         req.method shouldBe Method.DELETE
-        req.uri shouldBe baseGcsUri(bucket, path)
+        req.uri shouldBe objectURI
         Resource.pure(Response[IO](status = if (exists) Status.Ok else Status.NotFound))
       })
 
