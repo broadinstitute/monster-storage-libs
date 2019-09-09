@@ -11,7 +11,11 @@ import org.scalatest.{EitherValues, FlatSpec, Matchers}
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.Duration
 
-class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValues {
+class CommonsNetFtpApiSpec
+    extends FlatSpec
+    with Matchers
+    with MockFactory
+    with EitherValues {
 
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
   private implicit val t: Timer[IO] = IO.timer(ExecutionContext.global)
@@ -19,28 +23,41 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
   private val fakeDir = "some/path/to/some"
   private val fakePath = s"$fakeDir/file"
   private val fakeContents = "some text"
+  private val fakeChunkSize = 128
 
-  behavior of "FtpApi"
+  behavior of "CommonsNetFtpApi"
 
   it should "read remote files" in {
-    val fakeFtp = mock[FtpApi.Client]
+    val fakeFtp = mock[CommonsNetFtpApi.Client]
     (fakeFtp.openRemoteFile _)
       .expects(fakePath, 0L)
       .returning(Resource.pure(Some(new ByteArrayInputStream(fakeContents.getBytes()))))
 
-    val api = new FtpApi(fakeFtp, ExecutionContext.global, 0L, Duration.Zero)
+    val api = new CommonsNetFtpApi(
+      fakeFtp,
+      ExecutionContext.global,
+      fakeChunkSize,
+      0,
+      Duration.Zero
+    )
     val bytes = api.readFile(fakePath).compile.toChunk.unsafeRunSync()
 
     bytes.toArray shouldBe fakeContents.getBytes()
   }
 
   it should "not NPE when reading a nonexistent file" in {
-    val fakeFtp = mock[FtpApi.Client]
+    val fakeFtp = mock[CommonsNetFtpApi.Client]
     (fakeFtp.openRemoteFile _)
       .expects(fakePath, 0L)
       .returning(Resource.pure(None))
 
-    val api = new FtpApi(fakeFtp, ExecutionContext.global, 0L, Duration.Zero)
+    val api = new CommonsNetFtpApi(
+      fakeFtp,
+      ExecutionContext.global,
+      fakeChunkSize,
+      0,
+      Duration.Zero
+    )
     val bytesOrError = api.readFile(fakePath).compile.toChunk.attempt.unsafeRunSync()
 
     bytesOrError.left.value.getMessage should include(fakePath)
@@ -48,12 +65,18 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
 
   it should "start reading remote files at an offset" in {
     val expectedOffset = 2
-    val fakeFtp = mock[FtpApi.Client]
+    val fakeFtp = mock[CommonsNetFtpApi.Client]
     (fakeFtp.openRemoteFile _)
       .expects(fakePath, expectedOffset.toLong)
       .returning(Resource.pure(Some(new ByteArrayInputStream(fakeContents.getBytes()))))
 
-    val api = new FtpApi(fakeFtp, ExecutionContext.global, 0L, Duration.Zero)
+    val api = new CommonsNetFtpApi(
+      fakeFtp,
+      ExecutionContext.global,
+      fakeChunkSize,
+      0,
+      Duration.Zero
+    )
     val bytes = api
       .readFile(fakePath, fromByte = expectedOffset.toLong)
       .compile
@@ -64,12 +87,18 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
   }
 
   it should "terminate the remote file stream at an end byte" in {
-    val fakeFtp = mock[FtpApi.Client]
+    val fakeFtp = mock[CommonsNetFtpApi.Client]
     (fakeFtp.openRemoteFile _)
       .expects(fakePath, 0L)
       .returning(Resource.pure(Some(new ByteArrayInputStream(fakeContents.getBytes()))))
 
-    val api = new FtpApi(fakeFtp, ExecutionContext.global, 0L, Duration.Zero)
+    val api = new CommonsNetFtpApi(
+      fakeFtp,
+      ExecutionContext.global,
+      fakeChunkSize,
+      0,
+      Duration.Zero
+    )
     val bytes =
       api.readFile(fakePath, untilByte = Some(3L)).compile.toChunk.unsafeRunSync()
 
@@ -78,7 +107,7 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
 
   it should "read a custom range of bytes within a remote file" in {
     val expectedOffset = 2
-    val fakeFtp = mock[FtpApi.Client]
+    val fakeFtp = mock[CommonsNetFtpApi.Client]
     (fakeFtp.openRemoteFile _)
       .expects(fakePath, expectedOffset.toLong)
       .returning {
@@ -87,7 +116,13 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
         )
       }
 
-    val api = new FtpApi(fakeFtp, ExecutionContext.global, 0L, Duration.Zero)
+    val api = new CommonsNetFtpApi(
+      fakeFtp,
+      ExecutionContext.global,
+      fakeChunkSize,
+      0,
+      Duration.Zero
+    )
     val bytes = api
       .readFile(fakePath, fromByte = expectedOffset.toLong, untilByte = Some(3L))
       .compile
@@ -124,7 +159,7 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
         }
     }
 
-    val fakeFtp = mock[FtpApi.Client]
+    val fakeFtp = mock[CommonsNetFtpApi.Client]
     (fakeFtp.openRemoteFile _)
       .expects(fakePath, expectedOffset.toLong)
       .returning(Resource.pure(Some(inStream1)))
@@ -132,7 +167,13 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
       .expects(fakePath, failurePoint.toLong)
       .returning(Resource.pure(Some(inStream2)))
 
-    val api = new FtpApi(fakeFtp, ExecutionContext.global, 1L, Duration.Zero)
+    val api = new CommonsNetFtpApi(
+      fakeFtp,
+      ExecutionContext.global,
+      fakeChunkSize,
+      1,
+      Duration.Zero
+    )
     val bytes = api
       .readFile(fakePath, fromByte = expectedOffset.toLong, untilByte = Some(7L))
       .compile
@@ -155,12 +196,18 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
         }
     }
 
-    val fakeFtp = mock[FtpApi.Client]
+    val fakeFtp = mock[CommonsNetFtpApi.Client]
     (fakeFtp.openRemoteFile _)
       .expects(fakePath, 0L)
       .returning(Resource.pure(Some(inStream)))
 
-    val api = new FtpApi(fakeFtp, ExecutionContext.global, 1L, Duration.Zero)
+    val api = new CommonsNetFtpApi(
+      fakeFtp,
+      ExecutionContext.global,
+      fakeChunkSize,
+      1,
+      Duration.Zero
+    )
     val bytesOrError = api.readFile(fakePath).compile.toChunk.attempt.unsafeRunSync()
 
     bytesOrError.left.value.getMessage should include(fakePath)
@@ -182,7 +229,7 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
         }
     }
 
-    val fakeFtp = mock[FtpApi.Client]
+    val fakeFtp = mock[CommonsNetFtpApi.Client]
     (fakeFtp.openRemoteFile _)
       .expects(fakePath, expectedOffset.toLong)
       .returning(Resource.pure(Some(inStream1)))
@@ -190,7 +237,13 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
       .expects(fakePath, failurePoint.toLong)
       .returning(Resource.pure(Some(inStream1)))
 
-    val api = new FtpApi(fakeFtp, ExecutionContext.global, 1L, Duration.Zero)
+    val api = new CommonsNetFtpApi(
+      fakeFtp,
+      ExecutionContext.global,
+      fakeChunkSize,
+      1,
+      Duration.Zero
+    )
     val bytesOrError = api
       .readFile(fakePath, fromByte = expectedOffset.toLong)
       .compile
@@ -211,11 +264,17 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
       (toRet.getType _).when().returns(i % 4)
       toRet
     }
-    val fakeFtp = mock[FtpApi.Client]
+    val fakeFtp = mock[CommonsNetFtpApi.Client]
     (fakeFtp.statRemoteFile _).expects(fakePath).returning(IO.pure(Some(fakeDir)))
     (fakeFtp.listRemoteDirectory _).expects(fakePath).returning(IO.pure(fakeContents))
 
-    val api = new FtpApi(fakeFtp, ExecutionContext.global, 0L, Duration.Zero)
+    val api = new CommonsNetFtpApi(
+      fakeFtp,
+      ExecutionContext.global,
+      fakeChunkSize,
+      0,
+      Duration.Zero
+    )
     val contents = api.listDirectory(fakePath).compile.toList.unsafeRunSync()
 
     contents shouldBe List.tabulate(10) { i =>
@@ -233,10 +292,16 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
     val fakeFile = stub[FTPFile]
     (fakeFile.isDirectory _).when().returns(false)
 
-    val fakeFtp = mock[FtpApi.Client]
+    val fakeFtp = mock[CommonsNetFtpApi.Client]
     (fakeFtp.statRemoteFile _).expects(fakePath).returning(IO.pure(Some(fakeFile)))
 
-    val api = new FtpApi(fakeFtp, ExecutionContext.global, 0L, Duration.Zero)
+    val api = new CommonsNetFtpApi(
+      fakeFtp,
+      ExecutionContext.global,
+      fakeChunkSize,
+      0,
+      Duration.Zero
+    )
     val contentsOrError =
       api.listDirectory(fakePath).compile.toChunk.attempt.unsafeRunSync()
 
@@ -244,10 +309,16 @@ class FtpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValu
   }
 
   it should "raise an error when listing a nonexistent remote directory" in {
-    val fakeFtp = mock[FtpApi.Client]
+    val fakeFtp = mock[CommonsNetFtpApi.Client]
     (fakeFtp.statRemoteFile _).expects(fakePath).returning(IO.pure(None))
 
-    val api = new FtpApi(fakeFtp, ExecutionContext.global, 0L, Duration.Zero)
+    val api = new CommonsNetFtpApi(
+      fakeFtp,
+      ExecutionContext.global,
+      fakeChunkSize,
+      0,
+      Duration.Zero
+    )
     val contentsOrError =
       api.listDirectory(fakePath).compile.toChunk.attempt.unsafeRunSync()
 

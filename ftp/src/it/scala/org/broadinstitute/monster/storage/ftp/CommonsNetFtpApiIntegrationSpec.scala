@@ -7,7 +7,7 @@ import org.scalatest.{EitherValues, FlatSpec, Matchers}
 
 import scala.concurrent.ExecutionContext
 
-class FtpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
+class CommonsNetFtpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
 
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
   private implicit val t: Timer[IO] = IO.timer(ExecutionContext.global)
@@ -124,9 +124,9 @@ class FtpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
   private val testEmptyDir = "pub/README"
 
   private def getClient(info: FtpConnectionInfo = testInfo): Stream[IO, FtpApi] =
-    Stream.resource(FtpApi.build(info, ExecutionContext.global))
+    Stream.resource(CommonsNetFtpApi.build(info, ExecutionContext.global))
 
-  behavior of "FtpApi"
+  behavior of "CommonsNetFtpApi"
 
   it should "read remote files" in {
     val bytes = getClient()
