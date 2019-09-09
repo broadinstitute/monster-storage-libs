@@ -10,7 +10,7 @@ import io.circe.jawn.JawnParser
 import io.circe.syntax._
 import io.circe.{Json, JsonObject}
 import org.apache.commons.codec.binary.{Base64, Hex}
-import org.broadinstitute.monster.storage.common.FileType
+import org.broadinstitute.monster.storage.common.{FileType, OperationStatus}
 import org.http4s._
 import org.http4s.client.Client
 import org.http4s.headers._
@@ -463,63 +463,67 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     bucket: String,
     path: String,
     pageSize: Int
-  ): Stream[IO, (String, FileType)] =
-    // State-tracking is non-obvious here.
-    // We start with Some(None), signalling that there are still list pages to pull,
-    // but we don't know a page token to include in the next request.
-    Stream
-      .unfoldChunkEval(Option(Option.empty[String])) {
-        // As we iterate, any time the outermost Option is still Some(_) we know there
-        // are more pages to pull.
-        case Some(maybePrevToken) =>
-          // Build a list-request URI using the inner Option.
-          // If the inner Option is Some(_), the token within will be added as a query param.
-          val request = Request[IO](
-            method = Method.GET,
-            uri = listUri(bucket, path, pageSize, maybePrevToken)
-          )
-          runHttp(request).use { response =>
-            if (response.status.isSuccess) {
-              response.body.compile.toChunk.flatMap { byteChunk =>
-                // Parse the pieces we need out of the response JSON.
-                val nextOrError = for {
-                  listResults <- parser.parseByteBuffer(byteChunk.toByteBuffer)
-                  resultCursor = listResults.hcursor
-                  maybeDirs <- resultCursor.get[Option[Vector[String]]](ListPrefixesKey)
-                  dirs = maybeDirs.getOrElse(Vector.empty)
-                  maybeFiles <- resultCursor.get[Option[Vector[Json]]](ListResultsKey)
-                  files = maybeFiles.getOrElse(Vector.empty)
-                  fileNames <- files.traverse(_.hcursor.get[String](ObjectNameKey))
-                  nextPageToken <- resultCursor.get[Option[String]](ListTokenKey)
-                } yield {
-                  val outputs = List(
-                    fileNames -> FileType.File,
-                    // Prefixes aren't really directories in GCS, but this gives downstream
-                    // consumers something meaningful to use when distinguishing the two.
-                    dirs -> FileType.Directory
-                  ).map {
-                    case (names, fileType) => Chunk.vector(names).map(_ -> fileType)
-                  }
-                  // We always return Some(_) here to append the list results to the stream.
-                  // The RHS of the tuple within is the state to use on the next iteration.
-                  // If a "next-token" was returned with the list results, we double-nest it
-                  // so the following iteration knows:
-                  //   1. It should pull another page, and
-                  //   2. It should use the returned page token
-                  // If no page token was returned, the RHS here is None, and the next unfold
-                  // iteration will be the last.
-                  Option(Chunk.concat(outputs) -> nextPageToken.map(Option(_)))
-                }
-                nextOrError.liftTo[IO]
-              }
-            } else {
-              reportError(response, s"Failed to list contents of $bucket at path $path")
-            }
-          }
+  ): Stream[IO, (String, FileType)] = {
 
-        // As said above, the only way the state can flip to a top-level None is if we've
-        // pulled all the available pages. Pass the None through to halt iteration.
-        case None => IO.pure(None)
+    // Helper for pulling a single page of list results.
+    def pullNextPage(
+      maybePrevToken: Option[String]
+    ): IO[(Chunk[(String, FileType)], Option[String])] = {
+      val request = Request[IO](
+        method = Method.GET,
+        uri = listUri(bucket, path, pageSize, maybePrevToken)
+      )
+      runHttp(request).use { response =>
+        if (response.status.isSuccess) {
+          response.body.compile.toChunk.flatMap { byteChunk =>
+            // Parse the pieces we need out of the response JSON.
+            val nextOrError = for {
+              listResults <- parser.parseByteBuffer(byteChunk.toByteBuffer)
+              resultCursor = listResults.hcursor
+              maybeDirs <- resultCursor.get[Option[Vector[String]]](ListPrefixesKey)
+              dirs = maybeDirs.getOrElse(Vector.empty)
+              maybeFiles <- resultCursor.get[Option[Vector[Json]]](ListResultsKey)
+              files = maybeFiles.getOrElse(Vector.empty)
+              fileNames <- files.traverse(_.hcursor.get[String](ObjectNameKey))
+              nextPageToken <- resultCursor.get[Option[String]](ListTokenKey)
+            } yield {
+              val outputs = List(
+                fileNames -> FileType.File,
+                // Prefixes aren't really directories in GCS, but this gives downstream
+                // consumers something meaningful to use when distinguishing the two.
+                dirs -> FileType.Directory
+              ).map {
+                case (names, fileType) => Chunk.vector(names).map(_ -> fileType)
+              }
+              Chunk.concat(outputs) -> nextPageToken
+            }
+            nextOrError.liftTo[IO]
+          }
+        } else {
+          reportError(response, s"Failed to list contents of $bucket at path $path")
+        }
+      }
+    }
+
+    // Helper for converting the results of listing a single page into the types
+    // expected by `unfoldChunkEval`
+    def wrapPageResults(
+      results: (Chunk[(String, FileType)], Option[String])
+    ): Option[(Chunk[(String, FileType)], OperationStatus)] = {
+      val (outChunk, maybeNextToken) = results
+      val nextStatus = maybeNextToken
+        .fold[OperationStatus](OperationStatus.Done)(OperationStatus.InProgress)
+      Some(outChunk -> nextStatus)
+    }
+
+    Stream
+      .unfoldChunkEval(OperationStatus.NotStarted: OperationStatus) {
+        case OperationStatus.NotStarted =>
+          pullNextPage(None).map(wrapPageResults)
+        case OperationStatus.InProgress(token) =>
+          pullNextPage(Some(token)).map(wrapPageResults)
+        case OperationStatus.Done =>
+          IO.pure(None)
       }
       // Make sure there's at least one element in the result stream.
       .pull
@@ -532,6 +536,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
         case Some((first, rest)) => rest.cons1(first).pull.echo
       }
       .stream
+  }
 }
 
 object GcsApi {
