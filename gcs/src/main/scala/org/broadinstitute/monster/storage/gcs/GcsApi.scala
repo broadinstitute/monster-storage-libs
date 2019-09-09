@@ -563,61 +563,107 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     * @param sourcePath path within `sourceBucket` pointing to the file-to-copy
     * @param targetBucket GCS bucket to copy the file into
     * @param targetPath path within `targetBucket` where the copy should be written
-    * @param forceCompletion if true, HTTP requests will be issued until the copy
-    *                        operation is complete. Otherwise the return value will
-    *                        depend on whether or not the initial HTTP request completed
-    *                        the entire transfer
-    * @param prevToken rewrite ID returned by a previous call to this method. If given,
-    *                  the existing rewrite operation will be continued
     */
   def copyObject(
     sourceBucket: String,
     sourcePath: String,
     targetBucket: String,
-    targetPath: String,
-    forceCompletion: Boolean,
-    prevToken: Option[String]
-  ): IO[Either[String, Unit]] =
+    targetPath: String
+  ): IO[Unit] =
     Stream
-      .unfoldEval(Option(prevToken)) {
-        case Some(rewriteId) =>
-          val request = Request[IO](
-            method = Method.POST,
-            uri =
-              rewriteUri(sourceBucket, sourcePath, targetBucket, targetPath, rewriteId)
-          )
-
-          runHttp(request).use { response =>
-            if (response.status.isSuccess) {
-              response.body.compile.toChunk.flatMap { byteChunk =>
-                val next = for {
-                  copyResponse <- parser.parseByteBuffer(byteChunk.toByteBuffer)
-                  nextToken <- copyResponse.hcursor.get[Option[String]](CopyTokenKey)
-                } yield {
-                  nextToken match {
-                    case None => Some(Right(()) -> None)
-                    case Some(token) =>
-                      if (forceCompletion) {
-                        Some(Left(token) -> Option(Option(token)))
-                      } else {
-                        Some(Left(token) -> None)
-                      }
-                  }
-                }
-
-                next.liftTo[IO]
-              }
-            } else {
-              reportError(
-                response,
-                s"Failed to copy $sourcePath in $sourceBucket to $targetPath in $targetBucket"
-              )
-            }
-          }
-        case None => IO.pure(None)
+      .unfoldChunkEval(OperationStatus.NotStarted: OperationStatus) {
+        case OperationStatus.NotStarted =>
+          initializeCopy(sourceBucket, sourcePath, targetBucket, targetPath)
+            .map(res => Some((Chunk.empty, res)))
+        case OperationStatus.InProgress(token) =>
+          incrementCopy(sourceBucket, sourcePath, targetBucket, targetPath, token)
+            .map(res => Some((Chunk.empty, res)))
+        case OperationStatus.Done =>
+          IO.pure(None)
       }
       .compile
-      .lastOrError
+      .drain
+
+  /**
+    * Run the first step of a copy from one GCS object to another GCS path.
+    *
+    * If the object is "small enough" / co-located with the target path, the copy
+    * will succeed in the single operation. Otherwise a token will be returned for
+    * use in subsequent requests.
+    *
+    * @param sourceBucket GCS bucket containing the file to copy
+    * @param sourcePath path within `sourceBucket` pointing to the file-to-copy
+    * @param targetBucket GCS bucket to copy the file into
+    * @param targetPath path within `targetBucket` where the copy should be written
+    *
+    * @return [[OperationStatus.Done]] if the copy succeeded in one request, and
+    *         [[OperationStatus.InProgress]] otherwise
+    */
+  def initializeCopy(
+    sourceBucket: String,
+    sourcePath: String,
+    targetBucket: String,
+    targetPath: String
+  ): IO[OperationStatus] =
+    copyStep(sourceBucket, sourcePath, targetBucket, targetPath, None)
+
+  /**
+    * Continue an in-flight copy of a GCS object to another GCS path.
+    *
+    * @param sourceBucket GCS bucket containing the file to copy
+    * @param sourcePath path within `sourceBucket` pointing to the file-to-copy
+    * @param targetBucket GCS bucket to copy the file into
+    * @param targetPath path within `targetBucket` where the copy should be written
+    * @param prevToken continuation token returned by a previous call to the copy API
+    *                  with the same arguments
+    *
+    * @return [[OperationStatus.Done]] if the copy completes after this operation,
+    *         and [[OperationStatus.InProgress]] otherwise
+    */
+  def incrementCopy(
+    sourceBucket: String,
+    sourcePath: String,
+    targetBucket: String,
+    targetPath: String,
+    prevToken: String
+  ): IO[OperationStatus] =
+    copyStep(sourceBucket, sourcePath, targetBucket, targetPath, Some(prevToken))
+
+  /** Send a request to the GCS API to start/continue a GCS-internal copy. */
+  private def copyStep(
+    sourceBucket: String,
+    sourcePath: String,
+    targetBucket: String,
+    targetPath: String,
+    prevToken: Option[String]
+  ): IO[OperationStatus] = {
+    val request = Request[IO](
+      method = Method.POST,
+      uri = rewriteUri(sourceBucket, sourcePath, targetBucket, targetPath, prevToken)
+    )
+
+    runHttp(request).use { response =>
+      if (response.status.isSuccess) {
+        response.body.compile.toChunk.flatMap { byteChunk =>
+          val next = for {
+            copyResponse <- parser.parseByteBuffer(byteChunk.toByteBuffer)
+            nextToken <- copyResponse.hcursor.get[Option[String]](CopyTokenKey)
+          } yield {
+            nextToken match {
+              case None        => OperationStatus.Done
+              case Some(token) => OperationStatus.InProgress(token)
+            }
+          }
+          next.liftTo[IO]
+        }
+      } else {
+        reportError(
+          response,
+          s"Failed to copy $sourcePath in $sourceBucket to $targetPath in $targetBucket"
+        )
+      }
+    }
+  }
 }
 
 object GcsApi {

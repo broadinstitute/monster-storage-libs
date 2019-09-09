@@ -30,7 +30,9 @@ class GcsApiIntegrationSpec
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
   private implicit val t: Timer[IO] = IO.timer(ExecutionContext.global)
 
+  // Two buckets so we can test cross-bucket copy operations.
   private val bucket = "broad-dsp-monster-dev-integration-test-data"
+  private val bucket2 = "broad-dsp-monster-dev-integration-test-data2"
 
   private def bodyText(n: Long): Stream[IO, Byte] = {
     Stream
@@ -784,25 +786,42 @@ class GcsApiIntegrationSpec
       bodyChunk <- bodyText(2L * GcsApi.ChunkSize).compile.toChunk
       copiedBytes <- writeTestFile(bodyChunk).use { blob =>
         val copyTarget = s"copied/${blob.getName}"
-        for {
-          _ <- withClient(
-            _.copyObject(
-              sourceBucket = bucket,
-              sourcePath = blob.getName,
-              targetBucket = bucket,
-              targetPath = copyTarget,
-              forceCompletion = true,
-              prevToken = None
-            )
-          )
-          bytes <- IO.delay(new String(gcsClient.get(bucket, copyTarget).getContent()))
-          _ <- IO.delay(gcsClient.delete(bucket, copyTarget))
-        } yield {
-          bytes
-        }
+        Resource
+          .make(IO.pure(BlobId.of(bucket2, copyTarget))) { id =>
+            IO.delay(gcsClient.delete(id)).void
+          }
+          .use { target =>
+            withClient(
+              _.copyObject(bucket, blob.getName, target.getBucket, target.getName)
+            ) >> IO.delay(new String(gcsClient.get(target).getContent()))
+          }
       }
-      _ <- IO.delay(copiedBytes shouldBe new String(bodyChunk.toArray))
-    } yield ()
+    } yield {
+      copiedBytes shouldBe new String(bodyChunk.toArray)
+    }
+    checks.unsafeRunSync()
+  }
+
+  it should "raise a helpful error on copying a nonexistent file" in {
+    val err =
+      withClient(_.copyObject(bucket, "foo", bucket2, "bar")).attempt.unsafeRunSync()
+    val message = err.left.value.getMessage
+    message should include(bucket)
+    message should include("foo")
+    message should include(bucket2)
+    message should include("bar")
+  }
+
+  it should "raise a helpful error on copying to a nonexistent bucket" in {
+    val checks = for {
+      bodyChunk <- bodyText(2L * GcsApi.ChunkSize).compile.toChunk
+      err <- writeTestFile(bodyChunk).use { blob =>
+        withClient(_.copyObject(bucket, blob.getName, "foo", "bar")).attempt
+      }
+    } yield {
+      val message = err.left.value.getMessage
+      message should include("foo")
+    }
 
     checks.unsafeRunSync()
   }

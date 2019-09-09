@@ -732,4 +732,6 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     resultsOrErr.left.value.getMessage should include(path)
     resultsOrErr.left.value.getMessage should include(body)
   }
+
+  
 }
