@@ -605,8 +605,8 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     * @param targetBucket GCS bucket to copy the file into
     * @param targetPath path within `targetBucket` where the copy should be written
     *
-    * @return [[OperationStatus.Done]] if the copy succeeded in one request, and
-    *         [[OperationStatus.InProgress]] otherwise
+    * @return a [[Right]] if the copy completes after this operation, otherwise a
+    *         [[Left]] containing the token to use in subsequent requests
     */
   def initializeCopy(
     sourceBucket: String,
@@ -626,8 +626,8 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     * @param prevToken continuation token returned by a previous call to the copy API
     *                  with the same arguments
     *
-    * @return [[OperationStatus.Done]] if the copy completes after this operation,
-    *         and [[OperationStatus.InProgress]] otherwise
+    * @return a [[Right]] if the copy completes after this operation, otherwise a
+    *         [[Left]] containing the token to use in subsequent requests
     */
   def incrementCopy(
     sourceBucket: String,
