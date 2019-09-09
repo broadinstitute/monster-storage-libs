@@ -501,7 +501,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
                     case (names, fileType) => Chunk.vector(names).map(_ -> fileType)
                   }
                   // We always return Some(_) here to append the list results to the stream.
-                  // The RHS of the tupled within is the state to use on the next iteration.
+                  // The RHS of the tuple within is the state to use on the next iteration.
                   // If a "next-token" was returned with the list results, we double-nest it
                   // so the following iteration knows:
                   //   1. It should pull another page, and
@@ -521,6 +521,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
         // pulled all the available pages. Pass the None through to halt iteration.
         case None => IO.pure(None)
       }
+      // Make sure there's at least one element in the result stream.
       .pull
       .uncons1
       .flatMap {
