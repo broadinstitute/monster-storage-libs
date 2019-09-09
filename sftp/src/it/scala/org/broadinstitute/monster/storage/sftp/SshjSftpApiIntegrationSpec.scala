@@ -7,7 +7,7 @@ import org.scalatest.{EitherValues, FlatSpec, Matchers}
 
 import scala.concurrent.ExecutionContext
 
-class SftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
+class SshjSftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
 
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
   private implicit val t: Timer[IO] = IO.timer(ExecutionContext.global)
@@ -32,7 +32,7 @@ class SftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
   ).mkString("\r\n")
 
   def getClient(info: SftpLoginInfo = testLogin): Stream[IO, SftpApi] =
-    Stream.resource(SftpApi.build(info, ExecutionContext.global))
+    Stream.resource(SshjSftpApi.build(info, ExecutionContext.global))
 
   behavior of "SftpApi"
 
