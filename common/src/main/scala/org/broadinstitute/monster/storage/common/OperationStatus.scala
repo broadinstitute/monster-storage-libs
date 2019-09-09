@@ -15,7 +15,7 @@ private[storage] sealed trait OperationStatus extends EnumEntry
 private[storage] object OperationStatus extends Enum[OperationStatus] {
   override val values: IndexedSeq[OperationStatus] = findValues
 
-  case object NotStarted extends OperationStatus
-  case class InProgress(token: String) extends OperationStatus
-  case object Done extends OperationStatus
+  private[storage] case object NotStarted extends OperationStatus
+  private[storage] case class InProgress(token: String) extends OperationStatus
+  private[storage] case object Done extends OperationStatus
 }

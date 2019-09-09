@@ -569,20 +569,29 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     sourcePath: String,
     targetBucket: String,
     targetPath: String
-  ): IO[Unit] =
+  ): IO[Unit] = {
+    // Helper for converting the results of each copy call into the types expected
+    // by `unfoldChunkEval`.
+    def handleStepResult(
+      result: Either[String, Unit]
+    ): Option[(Chunk[Nothing], OperationStatus)] = Some(
+      Chunk.empty -> result.fold(OperationStatus.InProgress, _ => OperationStatus.Done)
+    )
+
     Stream
       .unfoldChunkEval(OperationStatus.NotStarted: OperationStatus) {
         case OperationStatus.NotStarted =>
           initializeCopy(sourceBucket, sourcePath, targetBucket, targetPath)
-            .map(res => Some((Chunk.empty, res)))
+            .map(handleStepResult)
         case OperationStatus.InProgress(token) =>
           incrementCopy(sourceBucket, sourcePath, targetBucket, targetPath, token)
-            .map(res => Some((Chunk.empty, res)))
+            .map(handleStepResult)
         case OperationStatus.Done =>
           IO.pure(None)
       }
       .compile
       .drain
+  }
 
   /**
     * Run the first step of a copy from one GCS object to another GCS path.
@@ -604,7 +613,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     sourcePath: String,
     targetBucket: String,
     targetPath: String
-  ): IO[OperationStatus] =
+  ): IO[Either[String, Unit]] =
     copyStep(sourceBucket, sourcePath, targetBucket, targetPath, None)
 
   /**
@@ -626,7 +635,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     targetBucket: String,
     targetPath: String,
     prevToken: String
-  ): IO[OperationStatus] =
+  ): IO[Either[String, Unit]] =
     copyStep(sourceBucket, sourcePath, targetBucket, targetPath, Some(prevToken))
 
   /** Send a request to the GCS API to start/continue a GCS-internal copy. */
@@ -636,7 +645,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     targetBucket: String,
     targetPath: String,
     prevToken: Option[String]
-  ): IO[OperationStatus] = {
+  ): IO[Either[String, Unit]] = {
     val request = Request[IO](
       method = Method.POST,
       uri = rewriteUri(sourceBucket, sourcePath, targetBucket, targetPath, prevToken)
@@ -649,10 +658,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
             copyResponse <- parser.parseByteBuffer(byteChunk.toByteBuffer)
             nextToken <- copyResponse.hcursor.get[Option[String]](CopyTokenKey)
           } yield {
-            nextToken match {
-              case None        => OperationStatus.Done
-              case Some(token) => OperationStatus.InProgress(token)
-            }
+            nextToken.toLeft(())
           }
           next.liftTo[IO]
         }
