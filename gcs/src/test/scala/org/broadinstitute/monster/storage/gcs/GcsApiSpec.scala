@@ -18,9 +18,12 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   import GcsApi._
 
   private val bucket = "bucket"
+  private val bucket2 = "bucket2"
   private val path = "the/path"
+  private val path2 = "the/path2"
   private val uploadToken = "upload-token"
   private val listToken = "list-token"
+  private val copyToken = "copy-token"
   private val smallChunkSize = 16
   private val smallPageSize = 16
 
@@ -32,6 +35,8 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   private val uploadURI = resumableUploadUri(bucket, Some(uploadToken))
   private val listURI = listUri(bucket, path, smallPageSize, None)
   private val continueListURI = listUri(bucket, path, smallPageSize, Some(listToken))
+  private val copyURI = rewriteUri(bucket, path, bucket2, path2, None)
+  private val continueCopyURI = rewriteUri(bucket, path, bucket2, path2, Some(copyToken))
 
   private val acceptEncodingHeader = Header("Accept-Encoding", "identity, gzip")
 
@@ -731,5 +736,108 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       api.listContents(bucket, path, smallPageSize).compile.drain.attempt.unsafeRunSync()
     resultsOrErr.left.value.getMessage should include(path)
     resultsOrErr.left.value.getMessage should include(body)
+  }
+
+  it should "copy objects in GCS in one shot" in {
+    val api = new GcsApi(req => {
+      req.method shouldBe Method.POST
+      req.uri shouldBe copyURI
+
+      Resource.pure(Response[IO](status = Status.Ok, body = Stream.emits("{}".getBytes)))
+    })
+
+    api.copyObject(bucket, path, bucket2, path2).unsafeRunSync()
+  }
+
+  it should "copy objects in GCS through multiple requests" in {
+    var requests = 0
+    val api = new GcsApi(req => {
+      req.method shouldBe Method.POST
+      if (requests == 0) {
+        req.uri shouldBe copyURI
+      } else {
+        req.uri shouldBe continueCopyURI
+      }
+      requests += 1
+
+      val response = if (requests < 5) {
+        Json.obj(CopyTokenKey -> copyToken.asJson)
+      } else {
+        Json.obj()
+      }
+      Resource.pure(
+        Response[IO](status = Status.Ok, body = Stream.emits(response.noSpaces.getBytes))
+      )
+    })
+
+    api.copyObject(bucket, path, bucket2, path2).unsafeRunSync()
+    requests shouldBe 5
+  }
+
+  it should "initialize long-running internal GCS copy operations" in {
+    val api = new GcsApi(req => {
+      req.method shouldBe Method.POST
+      req.uri shouldBe copyURI
+
+      val response = Json.obj(CopyTokenKey -> copyToken.asJson).noSpaces
+      Resource.pure(
+        Response[IO](status = Status.Ok, body = Stream.emits(response.getBytes))
+      )
+    })
+
+    api
+      .initializeCopy(bucket, path, bucket2, path2)
+      .unsafeRunSync() shouldBe Left(copyToken)
+  }
+
+  it should "continue long-running internal GCS copy operations" in {
+    val api = new GcsApi(req => {
+      req.method shouldBe Method.POST
+      req.uri shouldBe continueCopyURI
+
+      val response = Json.obj(CopyTokenKey -> copyToken.asJson).noSpaces
+      Resource.pure(
+        Response[IO](status = Status.Ok, body = Stream.emits(response.getBytes))
+      )
+    })
+
+    api
+      .incrementCopy(bucket, path, bucket2, path2, copyToken)
+      .unsafeRunSync() shouldBe Left(copyToken)
+  }
+
+  it should "finish long-running internal GCS copy operations" in {
+    val api = new GcsApi(req => {
+      req.method shouldBe Method.POST
+      req.uri shouldBe continueCopyURI
+
+      Resource.pure(
+        Response[IO](status = Status.Ok, body = Stream.emits("{}".getBytes))
+      )
+    })
+
+    api
+      .incrementCopy(bucket, path, bucket2, path2, copyToken)
+      .unsafeRunSync() shouldBe Right(())
+  }
+
+  it should "raise a helpful error when copy operations return an error code" in {
+    val error = "OH NO"
+    val api = new GcsApi(_ => {
+      Resource.pure(
+        Response[IO](
+          status = Status.InternalServerError,
+          body = Stream.emits(error.getBytes)
+        )
+      )
+    })
+
+    val result = api.copyObject(bucket, path, bucket2, path2).attempt.unsafeRunSync()
+    val message = result.left.value.getMessage
+    message should include(bucket)
+    message should include(path)
+    message should include(bucket2)
+    message should include(path2)
+    message should include(error)
   }
 }
