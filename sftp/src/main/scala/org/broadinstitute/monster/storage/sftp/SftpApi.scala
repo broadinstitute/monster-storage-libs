@@ -10,6 +10,7 @@ import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.sftp.{FileMode, RemoteResourceInfo, SFTPClient}
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
+import org.broadinstitute.monster.storage.common.FileType
 
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
@@ -92,14 +93,20 @@ class SftpApi private[sftp] (
     * @param path within the configured SFTP site pointing to the directory to list
     * @return name/type pairs for all entries in the listed directory
     */
-  def listDirectory(path: String): Stream[IO, (String, FileMode.Type)] = {
+  def listDirectory(path: String): Stream[IO, (String, FileType)] = {
     val getEntries = cs.evalOn(blockingEc)(client.listRemoteDirectory(path))
 
     Stream
       .eval(getEntries)
       .flatMap(Stream.emits)
       .map { info =>
-        (info.getPath, info.getAttributes.getType)
+        val fileType = info.getAttributes.getType match {
+          case FileMode.Type.REGULAR   => FileType.File
+          case FileMode.Type.DIRECTORY => FileType.Directory
+          case FileMode.Type.SYMLINK   => FileType.Symlink
+          case _                       => FileType.Other
+        }
+        (info.getPath, fileType)
       }
       .handleErrorWith { err =>
         Stream.raiseError[IO](new RuntimeException(s"Failed to list $path", err))

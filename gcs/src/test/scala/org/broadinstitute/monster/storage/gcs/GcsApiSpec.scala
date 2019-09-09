@@ -4,6 +4,9 @@ import cats.effect.{IO, Resource}
 import org.apache.commons.codec.digest.DigestUtils
 import cats.implicits._
 import fs2.Stream
+import io.circe.{Json, JsonObject}
+import io.circe.syntax._
+import org.broadinstitute.monster.storage.common.FileType
 import org.http4s._
 import org.http4s.headers._
 import org.http4s.multipart.Multipart
@@ -17,14 +20,18 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   private val bucket = "bucket"
   private val path = "the/path"
   private val uploadToken = "upload-token"
+  private val listToken = "list-token"
   private val smallChunkSize = 16
+  private val smallPageSize = 16
 
-  private val readObjectURI = baseGcsUri(bucket, path, "alt" -> "media")
-  private val statObjectURI = baseGcsUri(bucket, path, "alt" -> "json")
-  private val createObjectOneShotURI = baseGcsUploadUri(bucket, "multipart")
-  private val initResumableUploadURI = baseGcsUploadUri(bucket, "resumable")
-  private val uploadURI =
-    baseGcsUploadUri(bucket, "resumable").withQueryParam("upload_id", uploadToken)
+  private val objectURI = objectUri(bucket, path)
+  private val readObjectURI = objectDataUri(bucket, path)
+  private val statObjectURI = objectMetadataUri(bucket, path)
+  private val createObjectOneShotURI = multipartUploadUri(bucket)
+  private val initResumableUploadURI = resumableUploadUri(bucket, None)
+  private val uploadURI = resumableUploadUri(bucket, Some(uploadToken))
+  private val listURI = listUri(bucket, path, smallPageSize, None)
+  private val continueListURI = listUri(bucket, path, smallPageSize, Some(listToken))
 
   private val acceptEncodingHeader = Header("Accept-Encoding", "identity, gzip")
 
@@ -49,7 +56,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       request.headers.toList should contain theSameElementsAs List(
         `Content-Length`.unsafeFromLong(bodyChunk.size.toLong),
         `Content-Type`(MediaType.application.json, Charset.`UTF-8`),
-        Header(UploadContentLengthHeader, expectedSize.toString()),
+        Header(UploadContentLengthHeader, expectedSize.toString),
         Header(UploadContentTypeHeader, "text/event-stream")
       )
 
@@ -415,7 +422,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     } yield ()
 
     doChecks.unsafeRunSync()
-    ranges shouldBe (0 to bodyTextSize.toInt - 1 by ChunkSize).map { n =>
+    ranges shouldBe (0 until bodyTextSize.toInt by ChunkSize).map { n =>
       n -> math.min(bodyTextSize.toInt - 1, n + ChunkSize - 1)
     }
   }
@@ -457,7 +464,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     it should description in {
       val api = new GcsApi(req => {
         req.method shouldBe Method.DELETE
-        req.uri shouldBe baseGcsUri(bucket, path)
+        req.uri shouldBe objectURI
         Resource.pure(Response[IO](status = if (exists) Status.Ok else Status.NotFound))
       })
 
@@ -590,4 +597,139 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     start = 128L,
     recordedRatio = 0.5
   )
+
+  private def buildListResponse(
+    prefixes: Option[List[String]],
+    files: Option[List[String]],
+    nextToken: Option[String]
+  ): Json = {
+    val base = JsonObject.empty
+    val withToken = nextToken.fold(base)(t => base.add(GcsApi.ListTokenKey, t.asJson))
+    val withPrefixes =
+      prefixes.fold(withToken)(ps => withToken.add(GcsApi.ListPrefixesKey, ps.asJson))
+    val withFiles = files.fold(withPrefixes) { fs =>
+      withPrefixes.add(
+        GcsApi.ListResultsKey,
+        fs.map(f => Json.obj(GcsApi.ObjectNameKey -> f.asJson)).asJson
+      )
+    }
+    withFiles.asJson
+  }
+
+  it should "list directory contents" in {
+    val expectedPrefixes = List("foo/", "bar/")
+    val expectedFiles = List("file1", "file2")
+
+    val api = new GcsApi(req => {
+      req.method shouldBe Method.GET
+      req.uri shouldBe listURI
+
+      val body =
+        buildListResponse(Some(expectedPrefixes), Some(expectedFiles), None).noSpaces
+      Resource.pure(Response[IO](status = Status.Ok, body = Stream.emits(body.getBytes)))
+    })
+
+    val results =
+      api.listContents(bucket, path, smallPageSize).compile.toList.unsafeRunSync()
+    val expected = expectedPrefixes.map(_ -> FileType.Directory) :::
+      expectedFiles.map(_ -> FileType.File)
+    results should contain theSameElementsAs expected
+  }
+
+  it should "query all pages of list results" in {
+    val expectedPrefixes = List(List("foo/"), List("bar/"), List("baz/"))
+    val expectedFiles = List(List("file1"), List("file2"), List("file3"))
+    var pagesPulled = 0
+
+    val api = new GcsApi(req => {
+      req.method shouldBe Method.GET
+      if (pagesPulled == 0) {
+        req.uri shouldBe listURI
+      } else {
+        req.uri shouldBe continueListURI
+      }
+
+      val body = buildListResponse(
+        Some(expectedPrefixes(pagesPulled)),
+        Some(expectedFiles(pagesPulled)),
+        Some(listToken).filter(_ => pagesPulled + 1 < expectedFiles.length)
+      ).noSpaces
+      pagesPulled += 1
+      Resource.pure(Response[IO](status = Status.Ok, body = Stream.emits(body.getBytes)))
+    })
+
+    val results =
+      api.listContents(bucket, path, smallPageSize).compile.toList.unsafeRunSync()
+    val expected = expectedPrefixes.flatten.map(_ -> FileType.Directory) :::
+      expectedFiles.flatten.map(_ -> FileType.File)
+    results should contain theSameElementsAs expected
+  }
+
+  it should "not break if GCS returns no prefixes in list results" in {
+    val expectedFiles = List("file1", "file2")
+
+    val api = new GcsApi(req => {
+      req.method shouldBe Method.GET
+      req.uri shouldBe listURI
+
+      val body = buildListResponse(None, Some(expectedFiles), None).noSpaces
+      Resource.pure(Response[IO](status = Status.Ok, body = Stream.emits(body.getBytes)))
+    })
+
+    val results =
+      api.listContents(bucket, path, smallPageSize).compile.toList.unsafeRunSync()
+    val expected = expectedFiles.map(_ -> FileType.File)
+    results should contain theSameElementsAs expected
+  }
+
+  it should "not break if GCS returns only prefixes in list results" in {
+    val expectedPrefixes = List("foo/", "bar/")
+
+    val api = new GcsApi(req => {
+      req.method shouldBe Method.GET
+      req.uri shouldBe listURI
+
+      val body = buildListResponse(Some(expectedPrefixes), None, None).noSpaces
+      Resource.pure(Response[IO](status = Status.Ok, body = Stream.emits(body.getBytes)))
+    })
+
+    val results =
+      api.listContents(bucket, path, smallPageSize).compile.toList.unsafeRunSync()
+    val expected = expectedPrefixes.map(_ -> FileType.Directory)
+    results should contain theSameElementsAs expected
+  }
+
+  it should "raise a helpful error if GCS returns no list results" in {
+    val api = new GcsApi(req => {
+      req.method shouldBe Method.GET
+      req.uri shouldBe listURI
+
+      val body = buildListResponse(None, None, None).noSpaces
+      Resource.pure(Response[IO](status = Status.Ok, body = Stream.emits(body.getBytes)))
+    })
+
+    val resultsOrErr =
+      api.listContents(bucket, path, smallPageSize).compile.drain.attempt.unsafeRunSync()
+    resultsOrErr.left.value.getMessage should include(path)
+  }
+
+  it should "raise a helpful error if GCS returns an error code to a list request" in {
+    val body = "OH NO"
+    val api = new GcsApi(req => {
+      req.method shouldBe Method.GET
+      req.uri shouldBe listURI
+
+      Resource.pure(
+        Response[IO](
+          status = Status.InternalServerError,
+          body = Stream.emits(body.getBytes)
+        )
+      )
+    })
+
+    val resultsOrErr =
+      api.listContents(bucket, path, smallPageSize).compile.drain.attempt.unsafeRunSync()
+    resultsOrErr.left.value.getMessage should include(path)
+    resultsOrErr.left.value.getMessage should include(body)
+  }
 }

@@ -7,9 +7,11 @@ import cats.effect.{ContextShift, IO, Resource, Timer}
 import cats.implicits._
 import com.bettercloud.vault.{Vault, VaultConfig}
 import com.google.auth.oauth2.ServiceAccountCredentials
+import com.google.cloud.storage.Storage.BlobListOption
 import com.google.cloud.storage.{BlobId, BlobInfo, StorageOptions}
 import fs2.{Chunk, Stream}
 import org.apache.commons.codec.digest.DigestUtils
+import org.broadinstitute.monster.storage.common.FileType
 import org.http4s.{MediaType, Status}
 import org.http4s.client.blaze.BlazeClientBuilder
 import org.http4s.client.middleware.Logger
@@ -17,6 +19,7 @@ import org.http4s.headers._
 import org.scalatest.{BeforeAndAfterAll, EitherValues, FlatSpec, Matchers}
 
 import scala.concurrent.ExecutionContext
+import scala.collection.JavaConverters._
 
 class GcsApiIntegrationSpec
     extends FlatSpec
@@ -107,6 +110,35 @@ class GcsApiIntegrationSpec
       .map(_ => blobInfo.getBlobId)
 
     Resource.make(setup)(id => IO.delay(gcsClient.delete(id)).void)
+  }
+
+  private def writeTestDirectory(
+    levelOneCount: Int,
+    levelTwoCount: Int
+  ): Resource[IO, String] = {
+    val blobPrefix = s"test/${OffsetDateTime.now()}"
+    val setup = IO.delay {
+      (0 until levelOneCount).foreach { i =>
+        val blob = BlobId.of(bucket, s"$blobPrefix/lorem-$i.ipsum")
+        val blobInfo = BlobInfo.newBuilder(blob).setContentType("text/plain").build()
+        gcsClient.create(blobInfo, Array.empty[Byte])
+      }
+      (0 until levelTwoCount).foreach { j =>
+        val blob = BlobId.of(bucket, s"$blobPrefix/level2/lorem-$j.ipsum")
+        val blobInfo = BlobInfo.newBuilder(blob).setContentType("text/plain").build()
+        gcsClient.create(blobInfo, Array.empty[Byte])
+      }
+      blobPrefix
+    }
+
+    Resource.make(setup) { prefix =>
+      IO.delay {
+        val allBlobs =
+          gcsClient.list(bucket, BlobListOption.prefix(s"$prefix/")).iterateAll().asScala
+        gcsClient.delete(allBlobs.map(_.getBlobId).asJava)
+        ()
+      }
+    }
   }
 
   private def buildString(bytes: Stream[IO, Byte]): IO[String] =
@@ -313,7 +345,8 @@ class GcsApiIntegrationSpec
         .chunk(bodyChunk)
         .covary[IO]
         .through(fs2.compress.gzip(1024 * 1024))
-        .drop(10).take(40)
+        .drop(10)
+        .take(40)
         .compile
         .toVector
       _ <- IO.delay(writtenBytes shouldBe expected)
@@ -359,7 +392,7 @@ class GcsApiIntegrationSpec
     val path = s"test/${OffsetDateTime.now()}/foobar"
     val bodySize = GcsApi.MaxBytesPerUploadRequest / 2
     val body = bodyText(bodySize)
-    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync().toString())
+    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync())
 
     val wasCreated = withClient { api =>
       api
@@ -376,7 +409,7 @@ class GcsApiIntegrationSpec
     val path = s"test/${OffsetDateTime.now()}/foobar"
     val bodySize = GcsApi.MaxBytesPerUploadRequest * 2
     val body = bodyText(bodySize)
-    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync().toString())
+    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync())
 
     val wasCreated = withClient { api =>
       api
@@ -472,7 +505,7 @@ class GcsApiIntegrationSpec
   it should "create an object in GCS in one upload with a correct expected md5" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
     val body = bodyText(2L * GcsApi.ChunkSize)
-    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync().toString())
+    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync())
 
     val wasCreated = withClient { api =>
       api
@@ -560,7 +593,7 @@ class GcsApiIntegrationSpec
   it should "upload files using resumable uploads" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
     val body = bodyText(2L * GcsApi.ChunkSize)
-    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync().toString())
+    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync())
 
     withClient { api =>
       for {
@@ -598,7 +631,7 @@ class GcsApiIntegrationSpec
   it should "upload files using resumable uploads over multiple upload calls" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
     val body = bodyText(2L * GcsApi.ChunkSize)
-    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync().toString())
+    val bodyMd5 = DigestUtils.md5Hex(buildString(body).unsafeRunSync())
 
     withClient { api =>
       for {
@@ -691,5 +724,58 @@ class GcsApiIntegrationSpec
       IO.delay(gcsClient.delete(bucket, path)).as(())
       gcsExists(BlobId.of(bucket, path)) shouldBe false
     }
+  }
+
+  it should "list directory contents" in {
+    writeTestDirectory(10, 10).use { directory =>
+      withClient(_.listContents(bucket, s"$directory/", 20).compile.toList).map {
+        listResults =>
+          val expected = (s"$directory/level2/" -> FileType.Directory) :: List.tabulate(
+            10
+          ) { i =>
+            s"$directory/lorem-$i.ipsum" -> FileType.File
+          }
+
+          listResults should contain theSameElementsAs expected
+      }
+    }.unsafeRunSync()
+  }
+
+  it should "not break if there are no 'directories' under a listed path" in {
+    writeTestDirectory(10, 0).use { directory =>
+      withClient(_.listContents(bucket, s"$directory/", 20).compile.toList).map {
+        listResults =>
+          val expected =
+            List.tabulate(10)(i => s"$directory/lorem-$i.ipsum" -> FileType.File)
+          listResults should contain theSameElementsAs expected
+      }
+    }.unsafeRunSync()
+  }
+
+  it should "not break if there are only 'directories' under a listed path" in {
+    writeTestDirectory(0, 10).use { directory =>
+      withClient(_.listContents(bucket, s"$directory/", 20).compile.toList).map {
+        _ should contain only (s"$directory/level2/" -> FileType.Directory)
+      }
+    }.unsafeRunSync()
+  }
+
+  it should "read all pages of list results" in {
+    writeTestDirectory(20, 0).use { directory =>
+      withClient(_.listContents(bucket, s"$directory/", 3).compile.toList).map {
+        listResults =>
+          val expected = List.tabulate(20) { i =>
+            s"$directory/lorem-$i.ipsum" -> FileType.File
+          }
+
+          listResults should contain theSameElementsAs expected
+      }
+    }.unsafeRunSync()
+  }
+
+  it should "raise a helpful error on listing a nonexistent path" in {
+    val contentsOrError =
+      withClient(_.listContents(bucket, "foo", 10).compile.toList.attempt).unsafeRunSync()
+    contentsOrError.left.value.getMessage should include("foo")
   }
 }

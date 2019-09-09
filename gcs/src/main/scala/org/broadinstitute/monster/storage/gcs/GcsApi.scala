@@ -10,6 +10,7 @@ import io.circe.jawn.JawnParser
 import io.circe.syntax._
 import io.circe.{Json, JsonObject}
 import org.apache.commons.codec.binary.{Base64, Hex}
+import org.broadinstitute.monster.storage.common.{FileType, OperationStatus}
 import org.http4s._
 import org.http4s.client.Client
 import org.http4s.headers._
@@ -32,9 +33,8 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
   private def getObjectMetadata(
     bucket: String,
     path: String
-  ): Resource[IO, Response[IO]] = runHttp {
-    Request[IO](method = Method.GET, uri = baseGcsUri(bucket, path, "alt" -> "json"))
-  }
+  ): Resource[IO, Response[IO]] =
+    runHttp(Request[IO](method = Method.GET, uri = objectMetadataUri(bucket, path)))
 
   /**
     * Read a range of bytes (potentially the whole file) from an object in cloud storage.
@@ -70,7 +70,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     chunkSize: Int,
     gunzipIfNeeded: Boolean
   ): Stream[IO, Byte] = {
-    val objectUri = baseGcsUri(bucket, path, "alt" -> "media")
+    val objectUri = objectDataUri(bucket, path)
 
     def pullBytes(startByte: Long, endByte: Long): Stream[IO, Byte] = {
       val finalRequest = endByte - startByte - 1 <= chunkSize
@@ -108,10 +108,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
       if (response.status.isSuccess) {
         for {
           byteChunk <- response.body.compile.toChunk
-          objectMetadata <- parser
-            .parseByteBuffer(byteChunk.toByteBuffer)
-            .flatMap(_.as[Json])
-            .liftTo[IO]
+          objectMetadata <- parser.parseByteBuffer(byteChunk.toByteBuffer).liftTo[IO]
           objectSize <- objectMetadata.hcursor.get[Long](ObjectSizeKey).liftTo[IO]
         } yield {
           val maybeEncoding = for {
@@ -252,13 +249,15 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
 
     fullBody.compile.toChunk.flatMap { chunk =>
       val fullHeaders = Headers.of(
-        `Content-Type`(MediaType.multipartType("related", Some(multipartBoundary.value))),
+        `Content-Type`(
+          MediaType.multipartType(MultipartUploadSubtype, Some(multipartBoundary.value))
+        ),
         `Content-Length`.unsafeFromLong(chunk.size.toLong)
       )
 
       val gcsReq = Request[IO](
         method = Method.POST,
-        uri = baseGcsUploadUri(bucket, "multipart"),
+        uri = multipartUploadUri(bucket),
         headers = fullHeaders,
         body = Stream.chunk(chunk)
       )
@@ -301,7 +300,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
 
     val gcsReq = Request[IO](
       method = Method.POST,
-      uri = baseGcsUploadUri(bucket, "resumable"),
+      uri = resumableUploadUri(bucket, id = None),
       body = Stream.emits(objectMetadata),
       headers = Headers.of(
         `Content-Length`.unsafeFromLong(objectMetadata.length.toLong),
@@ -316,7 +315,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     runHttp(gcsReq).use { response =>
       response.headers
         .get(CaseInsensitiveString(UploadIDHeader))
-        .map { _.value }
+        .map(_.value)
         .liftTo[IO](
           new RuntimeException(
             s"No upload token returned after initializing upload to $path in $bucket"
@@ -378,8 +377,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
 
             val gcsReq = Request[IO](
               method = Method.PUT,
-              uri = baseGcsUploadUri(bucket, "resumable")
-                .withQueryParam("upload_id", uploadToken),
+              uri = resumableUploadUri(bucket, Some(uploadToken)),
               headers = Headers.of(
                 `Content-Length`.unsafeFromLong(chunkSize.toLong),
                 `Content-Range`(start, chunkEnd)
@@ -440,7 +438,7 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
     * @return true if an object was actually deleted, otherwise false
     */
   def deleteObject(bucket: String, path: String): IO[Boolean] = {
-    val gcsUri = baseGcsUri(bucket, path)
+    val gcsUri = objectUri(bucket, path)
     val gcsReq = Request[IO](method = Method.DELETE, uri = gcsUri)
 
     runHttp(gcsReq).use { response =>
@@ -450,6 +448,94 @@ class GcsApi private[gcs] (runHttp: Request[IO] => Resource[IO, Response[IO]]) {
         reportError(response, s"Failed to delete object $path in $bucket")
       }
     }
+  }
+
+  /**
+    * List the content of a GCS bucket under a path prefix.
+    *
+    * Returns a failed Stream if no objects exist under the prefix.
+    *
+    * @param bucket name of the bucket to list contents within
+    * @param path prefix to match listed contents against
+    * @param pageSize max number of results to pull from GCS per HTTP request
+    */
+  def listContents(
+    bucket: String,
+    path: String,
+    pageSize: Int
+  ): Stream[IO, (String, FileType)] = {
+
+    // Helper for pulling a single page of list results.
+    def pullNextPage(
+      maybePrevToken: Option[String]
+    ): IO[(Chunk[(String, FileType)], Option[String])] = {
+      val request = Request[IO](
+        method = Method.GET,
+        uri = listUri(bucket, path, pageSize, maybePrevToken)
+      )
+      runHttp(request).use { response =>
+        if (response.status.isSuccess) {
+          response.body.compile.toChunk.flatMap { byteChunk =>
+            // Parse the pieces we need out of the response JSON.
+            val nextOrError = for {
+              listResults <- parser.parseByteBuffer(byteChunk.toByteBuffer)
+              resultCursor = listResults.hcursor
+              maybeDirs <- resultCursor.get[Option[Vector[String]]](ListPrefixesKey)
+              dirs = maybeDirs.getOrElse(Vector.empty)
+              maybeFiles <- resultCursor.get[Option[Vector[Json]]](ListResultsKey)
+              files = maybeFiles.getOrElse(Vector.empty)
+              fileNames <- files.traverse(_.hcursor.get[String](ObjectNameKey))
+              nextPageToken <- resultCursor.get[Option[String]](ListTokenKey)
+            } yield {
+              val outputs = List(
+                fileNames -> FileType.File,
+                // Prefixes aren't really directories in GCS, but this gives downstream
+                // consumers something meaningful to use when distinguishing the two.
+                dirs -> FileType.Directory
+              ).map {
+                case (names, fileType) => Chunk.vector(names).map(_ -> fileType)
+              }
+              Chunk.concat(outputs) -> nextPageToken
+            }
+            nextOrError.liftTo[IO]
+          }
+        } else {
+          reportError(response, s"Failed to list contents of $bucket at path $path")
+        }
+      }
+    }
+
+    // Helper for converting the results of listing a single page into the types
+    // expected by `unfoldChunkEval`
+    def wrapPageResults(
+      results: (Chunk[(String, FileType)], Option[String])
+    ): Option[(Chunk[(String, FileType)], OperationStatus)] = {
+      val (outChunk, maybeNextToken) = results
+      val nextStatus = maybeNextToken
+        .fold[OperationStatus](OperationStatus.Done)(OperationStatus.InProgress)
+      Some(outChunk -> nextStatus)
+    }
+
+    Stream
+      .unfoldChunkEval(OperationStatus.NotStarted: OperationStatus) {
+        case OperationStatus.NotStarted =>
+          pullNextPage(None).map(wrapPageResults)
+        case OperationStatus.InProgress(token) =>
+          pullNextPage(Some(token)).map(wrapPageResults)
+        case OperationStatus.Done =>
+          IO.pure(None)
+      }
+      // Make sure there's at least one element in the result stream.
+      .pull
+      .uncons1
+      .flatMap {
+        case None =>
+          Pull.raiseError[IO](
+            new RuntimeException(s"No objects found in $bucket under $path")
+          )
+        case Some((first, rest)) => rest.cons1(first).pull.echo
+      }
+      .stream
   }
 }
 
@@ -518,20 +604,6 @@ object GcsApi {
       new GcsApi(req => Resource.liftF(auth.addAuth(req)).flatMap(httpClient.run))
     }
 
-  /** Build the JSON API endpoint for an existing bucket/path in GCS. */
-  def baseGcsUri(bucket: String, path: String, queryParams: (String, String)*): Uri = {
-    // NOTE: Calls to the `/` method cause the RHS to be URL-encoded.
-    // This is the correct behavior in this case, but it can cause confusion.
-    val uri = uri"https://www.googleapis.com/storage/v1/b/" / bucket / "o" / path
-    uri.copy(query = Query.fromPairs(queryParams: _*))
-  }
-
-  /** Build the JSON API endpoint for an upload to a GCS bucket. */
-  def baseGcsUploadUri(bucket: String, uploadType: String): Uri = {
-    val uri = uri"https://www.googleapis.com/upload/storage/v1/b" / bucket / "o"
-    uri.withQueryParam("uploadType", uploadType)
-  }
-
   private[gcs] val bytesPerKib = 1024
   private[gcs] val bytesPerMib = 1024 * bytesPerKib
 
@@ -554,6 +626,8 @@ object GcsApi {
     */
   val MaxBytesPerUploadRequest: Long = 5L * bytesPerMib
 
+  val MultipartUploadSubtype = "related"
+
   /**
     * Custom GCS header used when initializing a resumable upload to indicate the total
     * number of bytes that will be pushed over the course of that upload.
@@ -574,6 +648,9 @@ object GcsApi {
     */
   val UploadIDHeader = "X-GUploader-UploadID"
 
+  /** Key used in GCS object metadata to report the filesystem-like path of the object within its bucket. */
+  val ObjectNameKey: String = "name"
+
   /**
     * Key used in GCS object metadata to report the md5 of the object's contents.
     *
@@ -587,11 +664,86 @@ object GcsApi {
   /** Key used in GCS object metadata to report the encoding of an object's contents. */
   val ObjectEncodingKey: String = "contentEncoding"
 
+  /** Key which stores full object paths in responses to GCS "list objects" requests. */
+  val ListResultsKey: String = "items"
+
+  /** Key which stores directory-like object prefixes in responses to GCS "list objects" commands. */
+  val ListPrefixesKey: String = "prefixes"
+
+  /** Key which stores the token for the next page of results in responses to GCS "list objects" commands.  */
+  val ListTokenKey: String = "nextPageToken"
+
   /**
     * Status code returned by GCS when a request to upload bytes to a resumable
     * upload succeeds, but the server still expects more bytes.
     */
-  val ResumeIncompleteStatus = Status(308, "Resume Incomplete")
+  val ResumeIncompleteStatus: Status = Status(308, "Resume Incomplete")
+
+  /** Base URI for GCS APIs which reference a specific bucket or object. */
+  private[this] val GcsReferenceUri: Uri =
+    uri"https://www.googleapis.com/storage/v1/b"
+
+  /** Base URI for GCS APIs which create a new object inside a bucket. */
+  private[this] val GcsUploadUri: Uri =
+    uri"https://www.googleapis.com/upload/storage/v1/b"
+
+  /** Build the JSON API endpoint for an existing bucket/path in GCS. */
+  private[this] def gcsUri(
+    bucket: String,
+    path: Option[String],
+    queryParams: (String, String)*
+  ): Uri = {
+    // NOTE: Calls to the `/` method cause the RHS to be URL-encoded.
+    // This is the correct behavior in this case, but it can cause confusion.
+    val bucketUri = GcsReferenceUri / bucket / "o"
+    path.fold(bucketUri)(bucketUri / _).copy(query = Query.fromPairs(queryParams: _*))
+  }
+
+  /** Build a URI pointing to an object in a bucket. */
+  private[gcs] def objectUri(bucket: String, path: String): Uri =
+    gcsUri(bucket, Some(path))
+
+  /** Build a URI pointing to an object in a bucket which, when queried, will return the object's metadata. */
+  private[gcs] def objectMetadataUri(bucket: String, path: String): Uri =
+    gcsUri(bucket, Some(path), "alt" -> "json")
+
+  /** Build a URI pointing to an object in a bucket which, when queried, will return the object's contents. */
+  private[gcs] def objectDataUri(bucket: String, path: String): Uri =
+    gcsUri(bucket, Some(path), "alt" -> "media")
+
+  /** Build a URI pointing to a bucket which, when queried, will list the bucket's contents under a prefix. */
+  private[gcs] def listUri(
+    bucket: String,
+    path: String,
+    pageSize: Int,
+    pageToken: Option[String]
+  ): Uri = {
+    val base = gcsUri(
+      bucket,
+      None,
+      // Return every object starting with the prefix path.
+      "prefix" -> path,
+      // Run in 'directory mode', causing GCS to truncate returned paths at
+      // the delimiter & deduplicate instead of returning the full recursive
+      // path of every object.
+      "delimiter" -> "/",
+      // Paginate results.
+      "maxResults" -> pageSize.toString,
+      // Tell GCS not to include ACL information in returned payloads.
+      "projection" -> "noAcl"
+    )
+    pageToken.fold(base)(base.withQueryParam("pageToken", _))
+  }
+
+  /** Build a URI pointing to a bucket which, when POSTed to, will create a new file. */
+  private[gcs] def multipartUploadUri(bucket: String): Uri =
+    (GcsUploadUri / bucket / "o").withQueryParam("uploadType", "multipart")
+
+  /** Build a URI pointing to a bucket which, when POST=/PUT-ed to, will interact with a resumable upload. */
+  private[gcs] def resumableUploadUri(bucket: String, id: Option[String]): Uri = {
+    val base = (GcsUploadUri / bucket / "o").withQueryParam("uploadType", "resumable")
+    id.fold(base)(base.withQueryParam("upload_id", _))
+  }
 
   /**
     * Build object metadata to include in upload requests to GCS.
@@ -607,7 +759,7 @@ object GcsApi {
     expectedMd5: Option[String]
   ): Json = {
     // Object metadata is used by Google to register the upload to the correct pseudo-path.
-    val baseObjectMetadata = JsonObject("name" -> path.asJson)
+    val baseObjectMetadata = JsonObject(ObjectNameKey -> path.asJson)
     expectedMd5
       .fold(baseObjectMetadata) { hexMd5 =>
         baseObjectMetadata.add(

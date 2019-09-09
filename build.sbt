@@ -42,29 +42,30 @@ val betterMonadicForVersion = "0.3.1"
 // Data types & control flow.
 val catsVersion = "1.6.0"
 val catsEffectVersion = "1.2.0"
-val fs2Version = "1.0.4"
+val enumeratumVersion = "1.5.13"
+val fs2Version = "1.0.5"
 
 // JSON.
 val circeVersion = "0.11.1"
-val circeDerivationVersion = "0.11.0-M1"
+val circeDerivationVersion = "0.11.0-M3"
 
 // Logging.
 val logbackVersion = "1.2.3"
 val log4CatsVersion = "0.3.0"
 
 // Web.
-val http4sVersion = "0.20.6"
+val http4sVersion = "0.20.10"
 val sshJVersion = "0.27.0"
 
 // Storage libraries.
 val commonsNetVersion = "3.6"
-val googleAuthVersion = "0.16.2"
+val googleAuthVersion = "0.17.1"
 
 // Testing.
-val googleCloudJavaVersion = "1.84.0"
+val googleCloudJavaVersion = "1.90.0"
 val scalaMockVersion = "4.4.0"
 val scalaTestVersion = "3.0.8"
-val vaultDriverVersion = "4.1.0"
+val vaultDriverVersion = "5.0.0"
 
 // Settings to apply to all sub-projects.
 // Can't be applied at the build level because of scoping rules.
@@ -85,13 +86,24 @@ val commonSettings = Seq(
 
 lazy val `monster-storage-libs` = project
   .in(file("."))
-  .aggregate(`gcs-lib`, `ftp-lib`, `sftp-lib`)
+  .aggregate(`common-lib`, `gcs-lib`, `ftp-lib`, `sftp-lib`)
   .settings(publish / skip := true)
+
+lazy val `common-lib` = project
+  .in(file("common"))
+  .enablePlugins(PublishPlugin)
+  .settings(commonSettings)
+  .settings(
+    libraryDependencies ++= Seq(
+      "com.beachape" %% "enumeratum" % enumeratumVersion
+    )
+  )
 
 lazy val `gcs-lib` = project
   .in(file("gcs"))
   .configs(IntegrationTest)
   .enablePlugins(PublishPlugin)
+  .dependsOn(`common-lib`)
   .settings(commonSettings)
   .settings(
     Defaults.itSettings,
@@ -123,37 +135,39 @@ lazy val `gcs-lib` = project
   )
 
 lazy val `ftp-lib` = project
-.in(file("ftp"))
-.configs(IntegrationTest)
-.enablePlugins(PublishPlugin)
-.settings(commonSettings)
-.settings(
-  Defaults.itSettings,
-  libraryDependencies ++= Seq(
-    "ch.qos.logback" % "logback-classic" % logbackVersion,
-    "co.fs2" %% "fs2-core" % fs2Version,
-    "co.fs2" %% "fs2-io" % fs2Version,
-    "commons-net" % "commons-net" % commonsNetVersion,
-    "io.chrisdavenport" %% "log4cats-slf4j" % log4CatsVersion
-  ),
-  // All tests.
-  libraryDependencies ++= Seq(
-    "org.scalatest" %% "scalatest" % scalaTestVersion
-  ).map(_ % s"${Test.name},${IntegrationTest.name}"),
-  // Unit tests only.
-  libraryDependencies ++= Seq(
-    "org.scalamock" %% "scalamock" % scalaMockVersion
-  ).map(_ % Test),
-  dependencyOverrides := Seq(
-    "org.typelevel" %% "cats-core" % catsVersion,
-    "org.typelevel" %% "cats-effect" % catsEffectVersion
+  .in(file("ftp"))
+  .configs(IntegrationTest)
+  .enablePlugins(PublishPlugin)
+  .dependsOn(`common-lib`)
+  .settings(commonSettings)
+  .settings(
+    Defaults.itSettings,
+    libraryDependencies ++= Seq(
+      "ch.qos.logback" % "logback-classic" % logbackVersion,
+      "co.fs2" %% "fs2-core" % fs2Version,
+      "co.fs2" %% "fs2-io" % fs2Version,
+      "commons-net" % "commons-net" % commonsNetVersion,
+      "io.chrisdavenport" %% "log4cats-slf4j" % log4CatsVersion
+    ),
+    // All tests.
+    libraryDependencies ++= Seq(
+      "org.scalatest" %% "scalatest" % scalaTestVersion
+    ).map(_ % s"${Test.name},${IntegrationTest.name}"),
+    // Unit tests only.
+    libraryDependencies ++= Seq(
+      "org.scalamock" %% "scalamock" % scalaMockVersion
+    ).map(_ % Test),
+    dependencyOverrides := Seq(
+      "org.typelevel" %% "cats-core" % catsVersion,
+      "org.typelevel" %% "cats-effect" % catsEffectVersion
+    )
   )
-)
 
 lazy val `sftp-lib` = project
   .in(file("sftp"))
   .configs(IntegrationTest)
   .enablePlugins(PublishPlugin)
+  .dependsOn(`common-lib`)
   .settings(commonSettings)
   .settings(
     Defaults.itSettings,
