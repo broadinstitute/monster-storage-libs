@@ -195,7 +195,12 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherVal
 
   it should "list remote directories" in {
     val fakeContents =
-      List(fakePath -> FileMode.Type.REGULAR, s"$fakeDir/dir" -> FileMode.Type.DIRECTORY)
+      List(
+        fakePath -> FileMode.Type.REGULAR,
+        s"$fakeDir/dir" -> FileMode.Type.DIRECTORY,
+        s"$fakeDir/link" -> FileMode.Type.SYMLINK,
+        s"$fakePath.sock" -> FileMode.Type.SOCKET_SPECIAL
+      )
     val fakeSftp = mock[SftpApi.Client]
     (fakeSftp.listRemoteDirectory _).expects(fakeDir).returning {
       IO.pure {
@@ -216,7 +221,9 @@ class SftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherVal
     val contents = api.listDirectory(fakeDir).compile.toList.unsafeRunSync()
     contents should contain theSameElementsAs List(
       fakePath -> FileType.File,
-      s"$fakeDir/dir" -> FileType.Directory
+      s"$fakeDir/dir" -> FileType.Directory,
+      s"$fakeDir/link" -> FileType.Symlink,
+      s"$fakePath.sock" -> FileType.Other
     )
   }
 
