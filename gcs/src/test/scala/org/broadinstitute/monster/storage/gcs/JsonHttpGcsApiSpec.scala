@@ -14,8 +14,12 @@ import org.scalatest.{EitherValues, FlatSpec, Matchers, OptionValues}
 
 import scala.collection.mutable.ArrayBuffer
 
-class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherValues {
-  import GcsApi._
+class JsonHttpGcsApiSpec
+    extends FlatSpec
+    with Matchers
+    with OptionValues
+    with EitherValues {
+  import JsonHttpGcsApi._
 
   private val bucket = "bucket"
   private val bucket2 = "bucket2"
@@ -24,7 +28,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   private val uploadToken = "upload-token"
   private val listToken = "list-token"
   private val copyToken = "copy-token"
-  private val smallChunkSize = 16
+  private val smallChunkSize = 128
   private val smallPageSize = 16
 
   private val objectURI = objectUri(bucket, path)
@@ -39,6 +43,9 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   private val continueCopyURI = rewriteUri(bucket, path, bucket2, path2, Some(copyToken))
 
   private val acceptEncodingHeader = Header("Accept-Encoding", "identity, gzip")
+
+  private def buildApi(run: Request[IO] => Resource[IO, Response[IO]]): JsonHttpGcsApi =
+    new JsonHttpGcsApi(smallChunkSize, smallChunkSize, run)
 
   private def bodyText(n: Long): Stream[IO, Byte] =
     Stream
@@ -120,7 +127,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     }
   }
 
-  behavior of "GcsApi"
+  behavior of "JsonHttpGcsApi"
 
   // readObject
   def testReadObject(
@@ -134,12 +141,12 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     it should description in {
       val baseBytes = bodyText(numBytes)
       val body = if (gzip) {
-        baseBytes.through(fs2.compress.gzip(ChunkSize))
+        baseBytes.through(fs2.compress.gzip(smallChunkSize))
       } else {
         baseBytes
       }
 
-      val api = new GcsApi(req => {
+      val api = buildApi { req =>
         req.method shouldBe Method.GET
 
         if (req.uri == statObjectURI) {
@@ -171,7 +178,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
         } else {
           Resource.liftF(IO.raiseError(new Exception(s"Saw unexpected URI: ${req.uri}")))
         }
-      })
+      }
 
       val actual = stringify {
         api.readObjectByChunks(
@@ -179,13 +186,12 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
           path,
           fromByte = start,
           untilByte = end,
-          chunkSize = smallChunkSize,
           gunzipIfNeeded = gzip || forceGunzip
         )
       }
       val expected = stringify {
         val base = if (gzip) {
-          body.through(fs2.compress.gunzip(ChunkSize))
+          body.through(fs2.compress.gunzip(smallChunkSize))
         } else {
           body
         }.drop(start)
@@ -236,14 +242,14 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
          |
          |I broke.""".stripMargin
 
-    val api = new GcsApi({ _ =>
+    val api = buildApi { _ =>
       Resource.pure {
         Response[IO](
           status = Status.BadRequest,
           body = Stream.emit(err).through(fs2.text.utf8Encode)
         )
       }
-    })
+    }
 
     api
       .readObject(bucket, path)
@@ -263,14 +269,14 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
          |
          |I broke.""".stripMargin
 
-    val api = new GcsApi({ _ =>
+    val api = buildApi { _ =>
       Resource.pure {
         Response[IO](
           status = Status.BadGateway,
           body = Stream.emit(err).through(fs2.text.utf8Encode)
         )
       }
-    })
+    }
 
     api
       .readObject(bucket, path)
@@ -286,11 +292,11 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
 
   // statObject
   it should "return true if a GCS object exists" in {
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.GET
       req.uri shouldBe statObjectURI
       Resource.pure(Response[IO](body = Stream.emits("{}".getBytes())))
-    })
+    }
 
     api
       .statObject(bucket, path)
@@ -298,11 +304,11 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   }
 
   it should "return false if a GCS object does not exist" in {
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.GET
       req.uri shouldBe statObjectURI
       Resource.pure(Response[IO](status = Status.NotFound))
-    })
+    }
 
     api
       .statObject(bucket, path)
@@ -312,7 +318,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   it should "return the md5 of an existing object" in {
     val theMd5 = "abcdefg"
 
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.GET
       req.uri shouldBe statObjectURI
       Resource.pure(
@@ -320,54 +326,52 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
           body = Stream.emits(s"""{"$ObjectMd5Key": "$theMd5"}""".getBytes())
         )
       )
-    })
+    }
 
     api
       .statObject(bucket, path)
       .unsafeRunSync() shouldBe (true -> Some(theMd5))
   }
 
-  private def singleShotApiRequest(stringBody: String, md5: Option[String]): GcsApi = {
-    new GcsApi(req => {
+  private def singleShotApiRequest(stringBody: String, md5: Option[String]): GcsApi =
+    buildApi { req =>
       req.method shouldBe Method.POST
       req.uri shouldBe createObjectOneShotURI
       req.contentType.value.mediaType.isMultipart shouldBe true
 
-      val dataChecks = req.as[Multipart[IO]].flatMap {
-        multipart =>
-          multipart.parts.size shouldBe 2
-          val metadataPart = multipart.parts(0)
-          val dataPart = multipart.parts(1)
+      val dataChecks = req.as[Multipart[IO]].flatMap { multipart =>
+        multipart.parts.size shouldBe 2
+        val metadataPart = multipart.parts(0)
+        val dataPart = multipart.parts(1)
 
-          metadataPart.headers
-            .get(`Content-Type`)
-            .value
-            .mediaType shouldBe MediaType.application.json
-          dataPart.headers
-            .get(`Content-Type`)
-            .value shouldBe `Content-Type`(MediaType.`text/event-stream`)
+        metadataPart.headers
+          .get(`Content-Type`)
+          .value
+          .mediaType shouldBe MediaType.application.json
+        dataPart.headers
+          .get(`Content-Type`)
+          .value shouldBe `Content-Type`(MediaType.`text/event-stream`)
 
-          metadataPart.body.compile.toChunk.flatMap { metadataBytes =>
-            io.circe.parser
-              .parse(new String(metadataBytes.toArray[Byte]))
-              .right
-              .value shouldBe buildUploadMetadata(path, md5)
+        metadataPart.body.compile.toChunk.flatMap { metadataBytes =>
+          io.circe.parser
+            .parse(new String(metadataBytes.toArray[Byte]))
+            .right
+            .value shouldBe buildUploadMetadata(path, md5)
 
-            dataPart.body.compile.toChunk.map { dataBytes =>
-              new String(dataBytes.toArray[Byte]) shouldBe stringBody
-            }
+          dataPart.body.compile.toChunk.map { dataBytes =>
+            new String(dataBytes.toArray[Byte]) shouldBe stringBody
           }
+        }
       }
 
       Resource.liftF(dataChecks).map { _ =>
         Response[IO](status = Status.Ok)
       }
-    })
-  }
+    }
 
   // createObject
   it should "create a new object in GCS by using a multipart upload in a single shot" in {
-    val bodyTextSize = MaxBytesPerUploadRequest / 2
+    val bodyTextSize = smallChunkSize / 2L
     val baseBytes = bodyText(bodyTextSize)
     val doChecks = for {
       stringBody <- stringify(baseBytes)
@@ -389,14 +393,14 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
 
   it should "create a new object in GCS by uploading in chunks" in {
     val ranges = new ArrayBuffer[(Long, Long)]()
-    val bodyTextSize = MaxBytesPerUploadRequest * 2
+    val bodyTextSize = smallChunkSize * 2L
     val baseBytes = bodyText(bodyTextSize)
 
     val doChecks = for {
       stringBody <- stringify(baseBytes)
       md5 = Some(DigestUtils.md5Hex(stringBody))
 
-      api = new GcsApi(req => {
+      api = buildApi { req =>
         if (req.uri == initResumableUploadURI) {
           assertInitResumableUpload(
             req,
@@ -408,12 +412,12 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
           assertUploadBytes(
             req,
             ranges,
-            MaxBytesPerUploadRequest * 2L,
+            smallChunkSize * 2L,
             bodyTextSize - 1L,
             true
           )
         }
-      })
+      }
 
       _ <- api
         .createObject(
@@ -427,8 +431,8 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     } yield ()
 
     doChecks.unsafeRunSync()
-    ranges shouldBe (0 until bodyTextSize.toInt by ChunkSize).map { n =>
-      n -> math.min(bodyTextSize.toInt - 1, n + ChunkSize - 1)
+    ranges shouldBe (0 until bodyTextSize.toInt by smallChunkSize).map { n =>
+      n -> math.min(bodyTextSize.toInt - 1, n + smallChunkSize - 1)
     }
   }
 
@@ -467,11 +471,11 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   // deleteObject
   def testDeleteObject(description: String, exists: Boolean): Unit = {
     it should description in {
-      val api = new GcsApi(req => {
+      val api = buildApi { req =>
         req.method shouldBe Method.DELETE
         req.uri shouldBe objectURI
         Resource.pure(Response[IO](status = if (exists) Status.Ok else Status.NotFound))
-      })
+      }
 
       api.deleteObject(bucket, path).unsafeRunSync() shouldBe exists
     }
@@ -493,9 +497,9 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       val expectedSize = 10L
       val expectedMd5 = if (withMd5) Some("abcdef") else None
 
-      val api = new GcsApi(req => {
+      val api = buildApi { req =>
         assertInitResumableUpload(req, expectedSize, expectedMd5, uploadToken)
-      })
+      }
 
       api
         .initResumableUpload(
@@ -534,7 +538,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       val lastByte = start + numBytes - 1
       val bytes = bodyText(numBytes)
 
-      val api = new GcsApi(req => {
+      val api = buildApi { req =>
         assertUploadBytes(
           req,
           ranges,
@@ -542,7 +546,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
           lastByte,
           allBytes
         )
-      })
+      }
 
       val actual = api
         .uploadByteChunks(bucket, uploadToken, start, smallChunkSize, bytes)
@@ -609,13 +613,13 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     nextToken: Option[String]
   ): Json = {
     val base = JsonObject.empty
-    val withToken = nextToken.fold(base)(t => base.add(GcsApi.ListTokenKey, t.asJson))
+    val withToken = nextToken.fold(base)(t => base.add(ListTokenKey, t.asJson))
     val withPrefixes =
-      prefixes.fold(withToken)(ps => withToken.add(GcsApi.ListPrefixesKey, ps.asJson))
+      prefixes.fold(withToken)(ps => withToken.add(ListPrefixesKey, ps.asJson))
     val withFiles = files.fold(withPrefixes) { fs =>
       withPrefixes.add(
-        GcsApi.ListResultsKey,
-        fs.map(f => Json.obj(GcsApi.ObjectNameKey -> f.asJson)).asJson
+        ListResultsKey,
+        fs.map(f => Json.obj(ObjectNameKey -> f.asJson)).asJson
       )
     }
     withFiles.asJson
@@ -625,14 +629,14 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     val expectedPrefixes = List("foo/", "bar/")
     val expectedFiles = List("file1", "file2")
 
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.GET
       req.uri shouldBe listURI
 
       val body =
         buildListResponse(Some(expectedPrefixes), Some(expectedFiles), None).noSpaces
       Resource.pure(Response[IO](status = Status.Ok, body = Stream.emits(body.getBytes)))
-    })
+    }
 
     val results =
       api.listContents(bucket, path, smallPageSize).compile.toList.unsafeRunSync()
@@ -646,7 +650,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
     val expectedFiles = List(List("file1"), List("file2"), List("file3"))
     var pagesPulled = 0
 
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.GET
       if (pagesPulled == 0) {
         req.uri shouldBe listURI
@@ -661,7 +665,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       ).noSpaces
       pagesPulled += 1
       Resource.pure(Response[IO](status = Status.Ok, body = Stream.emits(body.getBytes)))
-    })
+    }
 
     val results =
       api.listContents(bucket, path, smallPageSize).compile.toList.unsafeRunSync()
@@ -673,13 +677,13 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   it should "not break if GCS returns no prefixes in list results" in {
     val expectedFiles = List("file1", "file2")
 
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.GET
       req.uri shouldBe listURI
 
       val body = buildListResponse(None, Some(expectedFiles), None).noSpaces
       Resource.pure(Response[IO](status = Status.Ok, body = Stream.emits(body.getBytes)))
-    })
+    }
 
     val results =
       api.listContents(bucket, path, smallPageSize).compile.toList.unsafeRunSync()
@@ -690,13 +694,13 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   it should "not break if GCS returns only prefixes in list results" in {
     val expectedPrefixes = List("foo/", "bar/")
 
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.GET
       req.uri shouldBe listURI
 
       val body = buildListResponse(Some(expectedPrefixes), None, None).noSpaces
       Resource.pure(Response[IO](status = Status.Ok, body = Stream.emits(body.getBytes)))
-    })
+    }
 
     val results =
       api.listContents(bucket, path, smallPageSize).compile.toList.unsafeRunSync()
@@ -705,13 +709,13 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   }
 
   it should "raise a helpful error if GCS returns no list results" in {
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.GET
       req.uri shouldBe listURI
 
       val body = buildListResponse(None, None, None).noSpaces
       Resource.pure(Response[IO](status = Status.Ok, body = Stream.emits(body.getBytes)))
-    })
+    }
 
     val resultsOrErr =
       api.listContents(bucket, path, smallPageSize).compile.drain.attempt.unsafeRunSync()
@@ -720,7 +724,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
 
   it should "raise a helpful error if GCS returns an error code to a list request" in {
     val body = "OH NO"
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.GET
       req.uri shouldBe listURI
 
@@ -730,7 +734,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
           body = Stream.emits(body.getBytes)
         )
       )
-    })
+    }
 
     val resultsOrErr =
       api.listContents(bucket, path, smallPageSize).compile.drain.attempt.unsafeRunSync()
@@ -739,19 +743,19 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   }
 
   it should "copy objects in GCS in one shot" in {
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.POST
       req.uri shouldBe copyURI
 
       Resource.pure(Response[IO](status = Status.Ok, body = Stream.emits("{}".getBytes)))
-    })
+    }
 
     api.copyObject(bucket, path, bucket2, path2).unsafeRunSync()
   }
 
   it should "copy objects in GCS through multiple requests" in {
     var requests = 0
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.POST
       if (requests == 0) {
         req.uri shouldBe copyURI
@@ -768,14 +772,14 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       Resource.pure(
         Response[IO](status = Status.Ok, body = Stream.emits(response.noSpaces.getBytes))
       )
-    })
+    }
 
     api.copyObject(bucket, path, bucket2, path2).unsafeRunSync()
     requests shouldBe 5
   }
 
   it should "initialize long-running internal GCS copy operations" in {
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.POST
       req.uri shouldBe copyURI
 
@@ -783,7 +787,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       Resource.pure(
         Response[IO](status = Status.Ok, body = Stream.emits(response.getBytes))
       )
-    })
+    }
 
     api
       .initializeCopy(bucket, path, bucket2, path2)
@@ -791,7 +795,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   }
 
   it should "continue long-running internal GCS copy operations" in {
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.POST
       req.uri shouldBe continueCopyURI
 
@@ -799,7 +803,7 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
       Resource.pure(
         Response[IO](status = Status.Ok, body = Stream.emits(response.getBytes))
       )
-    })
+    }
 
     api
       .incrementCopy(bucket, path, bucket2, path2, copyToken)
@@ -807,14 +811,14 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
   }
 
   it should "finish long-running internal GCS copy operations" in {
-    val api = new GcsApi(req => {
+    val api = buildApi { req =>
       req.method shouldBe Method.POST
       req.uri shouldBe continueCopyURI
 
       Resource.pure(
         Response[IO](status = Status.Ok, body = Stream.emits("{}".getBytes))
       )
-    })
+    }
 
     api
       .incrementCopy(bucket, path, bucket2, path2, copyToken)
@@ -823,14 +827,14 @@ class GcsApiSpec extends FlatSpec with Matchers with OptionValues with EitherVal
 
   it should "raise a helpful error when copy operations return an error code" in {
     val error = "OH NO"
-    val api = new GcsApi(_ => {
+    val api = buildApi { _ =>
       Resource.pure(
         Response[IO](
           status = Status.InternalServerError,
           body = Stream.emits(error.getBytes)
         )
       )
-    })
+    }
 
     val result = api.copyObject(bucket, path, bucket2, path2).attempt.unsafeRunSync()
     val message = result.left.value.getMessage
