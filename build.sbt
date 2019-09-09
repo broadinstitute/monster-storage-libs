@@ -43,29 +43,29 @@ val betterMonadicForVersion = "0.3.1"
 val catsVersion = "1.6.0"
 val catsEffectVersion = "1.2.0"
 val enumeratumVersion = "1.5.13"
-val fs2Version = "1.0.4"
+val fs2Version = "1.0.5"
 
 // JSON.
 val circeVersion = "0.11.1"
-val circeDerivationVersion = "0.11.0-M1"
+val circeDerivationVersion = "0.11.0-M3"
 
 // Logging.
 val logbackVersion = "1.2.3"
 val log4CatsVersion = "0.3.0"
 
 // Web.
-val http4sVersion = "0.20.6"
+val http4sVersion = "0.20.10"
 val sshJVersion = "0.27.0"
 
 // Storage libraries.
 val commonsNetVersion = "3.6"
-val googleAuthVersion = "0.16.2"
+val googleAuthVersion = "0.17.1"
 
 // Testing.
-val googleCloudJavaVersion = "1.84.0"
+val googleCloudJavaVersion = "1.90.0"
 val scalaMockVersion = "4.4.0"
 val scalaTestVersion = "3.0.8"
-val vaultDriverVersion = "4.1.0"
+val vaultDriverVersion = "5.0.0"
 
 // Settings to apply to all sub-projects.
 // Can't be applied at the build level because of scoping rules.
