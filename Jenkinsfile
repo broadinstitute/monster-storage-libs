@@ -36,12 +36,12 @@ pipeline {
             }
         }
         stage('Publish') {
-            /*when {
+            when {
                 anyOf {
                     branch 'master'
                     tag pattern: 'v\\d.*', comparator: 'REGEXP'
                 }
-            }*/
+            }
             steps {
                 script {
                     def vaultPath = 'secret/dsp/accts/artifactory/dsdejenkins'
