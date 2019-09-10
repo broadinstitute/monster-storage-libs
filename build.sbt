@@ -1,41 +1,3 @@
-// Settings to apply across the entire build
-inThisBuild(
-  Seq(
-    organization := "org.broadinstitute.monster",
-    scalaVersion := "2.12.8",
-    // Auto-format
-    scalafmtConfig := (ThisBuild / baseDirectory)(_ / ".scalafmt.conf").value,
-    scalafmtOnCompile := true,
-    // Recommended guardrails
-    scalacOptions ++= Seq(
-      "-deprecation",
-      "-encoding",
-      "UTF-8",
-      "-explaintypes",
-      "-feature",
-      "-target:jvm-1.8",
-      "-unchecked",
-      "-Xcheckinit",
-      "-Xfatal-warnings",
-      "-Xfuture",
-      "-Xlint",
-      "-Xmax-classfile-name",
-      "200",
-      "-Yno-adapted-args",
-      "-Ypartial-unification",
-      "-Ywarn-dead-code",
-      "-Ywarn-extra-implicit",
-      "-Ywarn-inaccessible",
-      "-Ywarn-infer-any",
-      "-Ywarn-nullary-override",
-      "-Ywarn-nullary-unit",
-      "-Ywarn-numeric-widen",
-      "-Ywarn-unused",
-      "-Ywarn-value-discard"
-    )
-  )
-)
-
 // Compiler plugins.
 val betterMonadicForVersion = "0.3.1"
 
@@ -67,23 +29,6 @@ val scalaMockVersion = "4.4.0"
 val scalaTestVersion = "3.0.8"
 val vaultDriverVersion = "5.0.0"
 
-// Settings to apply to all sub-projects.
-// Can't be applied at the build level because of scoping rules.
-val commonSettings = Seq(
-  addCompilerPlugin("com.olegpy" %% "better-monadic-for" % betterMonadicForVersion),
-  Compile / console / scalacOptions := (Compile / scalacOptions).value.filterNot(
-    Set(
-      "-Xfatal-warnings",
-      "-Xlint",
-      "-Ywarn-unused",
-      "-Ywarn-unused-import"
-    )
-  ),
-  Compile / doc / scalacOptions += "-no-link-warnings",
-  Test / fork := true,
-  IntegrationTest / fork := true
-)
-
 lazy val `monster-storage-libs` = project
   .in(file("."))
   .aggregate(`common-lib`, `gcs-lib`, `ftp-lib`, `sftp-lib`)
@@ -91,8 +36,7 @@ lazy val `monster-storage-libs` = project
 
 lazy val `common-lib` = project
   .in(file("common"))
-  .enablePlugins(PublishPlugin)
-  .settings(commonSettings)
+  .enablePlugins(LibraryPlugin)
   .settings(
     libraryDependencies ++= Seq(
       "com.beachape" %% "enumeratum" % enumeratumVersion
@@ -102,9 +46,8 @@ lazy val `common-lib` = project
 lazy val `gcs-lib` = project
   .in(file("gcs"))
   .configs(IntegrationTest)
-  .enablePlugins(PublishPlugin)
+  .enablePlugins(LibraryPlugin)
   .dependsOn(`common-lib`)
-  .settings(commonSettings)
   .settings(
     Defaults.itSettings,
     // Main code.
@@ -137,9 +80,8 @@ lazy val `gcs-lib` = project
 lazy val `ftp-lib` = project
   .in(file("ftp"))
   .configs(IntegrationTest)
-  .enablePlugins(PublishPlugin)
+  .enablePlugins(LibraryPlugin)
   .dependsOn(`common-lib`)
-  .settings(commonSettings)
   .settings(
     Defaults.itSettings,
     libraryDependencies ++= Seq(
@@ -166,9 +108,8 @@ lazy val `ftp-lib` = project
 lazy val `sftp-lib` = project
   .in(file("sftp"))
   .configs(IntegrationTest)
-  .enablePlugins(PublishPlugin)
+  .enablePlugins(LibraryPlugin)
   .dependsOn(`common-lib`)
-  .settings(commonSettings)
   .settings(
     Defaults.itSettings,
     libraryDependencies ++= Seq(
