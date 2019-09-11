@@ -152,8 +152,14 @@ private[gcs] class JsonHttpGcsApi(
             objectCursor = objectMetadata.hcursor
             objectSize <- objectCursor.get[Long](ObjectSizeKey)
             objectMd5 <- objectCursor.get[Option[String]](ObjectMd5Key)
+            hexMd5 <- objectMd5.fold[Either[Throwable, Option[String]]](Right(None)) {
+              b64Md5 =>
+                Either.catchNonFatal(
+                  Some(Hex.encodeHexString(Base64.decodeBase64(b64Md5)))
+                )
+            }
           } yield {
-            Some(FileAttributes(objectSize, objectMd5))
+            Some(FileAttributes(objectSize, hexMd5))
           }
           parseMetadata.liftTo[IO]
         }

@@ -6,6 +6,7 @@ import cats.implicits._
 import fs2.Stream
 import io.circe.{Json, JsonObject}
 import io.circe.syntax._
+import org.apache.commons.codec.binary.{Base64, Hex}
 import org.broadinstitute.monster.storage.common.{FileAttributes, FileType}
 import org.http4s._
 import org.http4s.headers._
@@ -319,14 +320,15 @@ class JsonHttpGcsApiSpec
   }
 
   it should "return the md5 of an existing object" in {
-    val theMd5 = "abcdefg"
+    val theMd5 = "abcdef123456"
+    val b64Md5 = Base64.encodeBase64String(Hex.decodeHex(theMd5))
 
     val api = buildApi { req =>
       req.method shouldBe Method.GET
       req.uri shouldBe statObjectURI
 
       val response = Json
-        .obj(ObjectMd5Key -> theMd5.asJson, ObjectSizeKey -> smallChunkSize.asJson)
+        .obj(ObjectMd5Key -> b64Md5.asJson, ObjectSizeKey -> smallChunkSize.asJson)
         .noSpaces
       Resource.pure(Response[IO](body = Stream.emits(response.getBytes())))
     }

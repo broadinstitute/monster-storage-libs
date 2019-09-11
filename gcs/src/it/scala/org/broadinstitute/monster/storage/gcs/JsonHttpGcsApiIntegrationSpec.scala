@@ -11,12 +11,12 @@ import com.google.cloud.storage.Storage.BlobListOption
 import com.google.cloud.storage.{BlobId, BlobInfo, StorageOptions}
 import fs2.{Chunk, Stream}
 import org.apache.commons.codec.digest.DigestUtils
-import org.broadinstitute.monster.storage.common.{FileAttributes, FileType}
+import org.broadinstitute.monster.storage.common.FileType
 import org.http4s.{MediaType, Status}
 import org.http4s.client.blaze.BlazeClientBuilder
 import org.http4s.client.middleware.Logger
 import org.http4s.headers._
-import org.scalatest.{BeforeAndAfterAll, EitherValues, FlatSpec, Matchers}
+import org.scalatest.{BeforeAndAfterAll, EitherValues, FlatSpec, Matchers, OptionValues}
 
 import scala.concurrent.ExecutionContext
 import scala.collection.JavaConverters._
@@ -25,11 +25,11 @@ class JsonHttpGcsApiIntegrationSpec
     extends FlatSpec
     with Matchers
     with BeforeAndAfterAll
-    with EitherValues {
+    with EitherValues
+    with OptionValues {
 
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
   private implicit val t: Timer[IO] = IO.timer(ExecutionContext.global)
-
   // Two buckets so we can test cross-bucket copy operations.
   private val bucket = "broad-dsp-monster-dev-integration-test-data"
   private val bucket2 = "broad-dsp-monster-dev-integration-test-data2"
@@ -564,40 +564,22 @@ class JsonHttpGcsApiIntegrationSpec
   it should "check if a GCS object exists and return its size + md5" in {
     val checks = for {
       bodyChunk <- bodyText(chunkSize.toLong).compile.toChunk
-      objectExists <- writeGzippedTestFile(bodyChunk).use { blob =>
-        withClient { api =>
-          api.statObject(blob.getBucket, blob.getName).map {
-            case Some(FileAttributes(size, Some(md5))) =>
-              gcsExists(blob) &&
-                size == chunkSize.toLong &&
-                md5 == gcsClient.get(blob).getMd5
-            case _ => ???
-          }
-        }
+      objectInfo <- writeTestFile(bodyChunk).use { blob =>
+        withClient(_.statObject(blob.getBucket, blob.getName))
       }
-      _ <- IO.delay(objectExists shouldBe true)
-    } yield ()
+    } yield {
+      val attributes = objectInfo.value
+      attributes.size shouldBe chunkSize.toLong
+      attributes.md5 shouldBe Some(DigestUtils.md5Hex(bodyChunk.toArray))
+    }
 
     checks.unsafeRunSync()
   }
 
-  it should "check if a GCS object exists and return false" in {
+  it should "check if a nonexistent GCS object exists" in {
     val path = s"test/${OffsetDateTime.now()}/foobar"
 
-    val checks = for {
-      bodyChunk <- bodyText(chunkSize.toLong).compile.toChunk
-      objectExists <- writeGzippedTestFile(bodyChunk).use { blob =>
-        withClient { api =>
-          api.statObject(blob.getBucket, path).map {
-            case None => !gcsExists(blob)
-            case _    => ???
-          }
-        }
-      }
-      _ <- IO.delay(objectExists shouldBe true)
-    } yield ()
-
-    checks.unsafeRunSync()
+    withClient(_.statObject(bucket, path)).map(_.isDefined shouldBe false).unsafeRunSync()
   }
 
   // init and upload
