@@ -16,12 +16,11 @@ val logbackVersion = "1.2.3"
 val log4CatsVersion = "0.3.0"
 
 // Web.
-val http4sVersion = "0.20.10"
-val sshJVersion = "0.27.0"
-
-// Storage libraries.
+val commonsCodecVersion = "1.13"
 val commonsNetVersion = "3.6"
 val googleAuthVersion = "0.17.1"
+val http4sVersion = "0.20.10"
+val sshJVersion = "0.27.0"
 
 // Testing.
 val googleCloudJavaVersion = "1.90.0"
@@ -54,6 +53,7 @@ lazy val `gcs-lib` = project
     libraryDependencies ++= Seq(
       "ch.qos.logback" % "logback-classic" % logbackVersion,
       "com.google.auth" % "google-auth-library-oauth2-http" % googleAuthVersion,
+      "commons-codec" % "commons-codec" % commonsCodecVersion,
       "io.circe" %% "circe-core" % circeVersion,
       "io.circe" %% "circe-derivation" % circeDerivationVersion,
       "io.circe" %% "circe-parser" % circeVersion,

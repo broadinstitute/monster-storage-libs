@@ -6,7 +6,8 @@ import cats.implicits._
 import fs2.Stream
 import io.circe.{Json, JsonObject}
 import io.circe.syntax._
-import org.broadinstitute.monster.storage.common.FileType
+import org.apache.commons.codec.binary.{Base64, Hex}
+import org.broadinstitute.monster.storage.common.{FileAttributes, FileType}
 import org.http4s._
 import org.http4s.headers._
 import org.http4s.multipart.Multipart
@@ -291,19 +292,22 @@ class JsonHttpGcsApiSpec
   }
 
   // statObject
-  it should "return true if a GCS object exists" in {
+  it should "return attributes for GCS objects that exist" in {
     val api = buildApi { req =>
       req.method shouldBe Method.GET
       req.uri shouldBe statObjectURI
-      Resource.pure(Response[IO](body = Stream.emits("{}".getBytes())))
+
+      val response = Json.obj(ObjectSizeKey -> smallChunkSize.asJson).noSpaces
+      Resource.pure(Response[IO](body = Stream.emits(response.getBytes())))
     }
 
     api
       .statObject(bucket, path)
-      .unsafeRunSync() shouldBe (true -> None)
+      .unsafeRunSync()
+      .value shouldBe FileAttributes(smallChunkSize.toLong, None)
   }
 
-  it should "return false if a GCS object does not exist" in {
+  it should "return no attributes for non-existing GCS objects" in {
     val api = buildApi { req =>
       req.method shouldBe Method.GET
       req.uri shouldBe statObjectURI
@@ -312,25 +316,27 @@ class JsonHttpGcsApiSpec
 
     api
       .statObject(bucket, path)
-      .unsafeRunSync() shouldBe (false -> None)
+      .unsafeRunSync() shouldBe None
   }
 
   it should "return the md5 of an existing object" in {
-    val theMd5 = "abcdefg"
+    val theMd5 = "abcdef123456"
+    val b64Md5 = Base64.encodeBase64String(Hex.decodeHex(theMd5))
 
     val api = buildApi { req =>
       req.method shouldBe Method.GET
       req.uri shouldBe statObjectURI
-      Resource.pure(
-        Response[IO](
-          body = Stream.emits(s"""{"$ObjectMd5Key": "$theMd5"}""".getBytes())
-        )
-      )
+
+      val response = Json
+        .obj(ObjectMd5Key -> b64Md5.asJson, ObjectSizeKey -> smallChunkSize.asJson)
+        .noSpaces
+      Resource.pure(Response[IO](body = Stream.emits(response.getBytes())))
     }
 
     api
       .statObject(bucket, path)
-      .unsafeRunSync() shouldBe (true -> Some(theMd5))
+      .unsafeRunSync()
+      .value shouldBe FileAttributes(smallChunkSize.toLong, Some(theMd5))
   }
 
   private def singleShotApiRequest(stringBody: String, md5: Option[String]): GcsApi =
