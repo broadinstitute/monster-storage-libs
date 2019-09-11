@@ -8,9 +8,14 @@ import fs2.{Chunk, Stream}
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.SSHException
-import net.schmizz.sshj.sftp.{FileMode, RemoteResourceInfo, SFTPClient}
+import net.schmizz.sshj.sftp.{
+  FileAttributes => RawAttributes,
+  FileMode,
+  RemoteResourceInfo,
+  SFTPClient
+}
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
-import org.broadinstitute.monster.storage.common.FileType
+import org.broadinstitute.monster.storage.common.{FileAttributes, FileType}
 
 import scala.collection.JavaConverters._
 import scala.concurrent.ExecutionContext
@@ -84,6 +89,10 @@ private[sftp] class SshjSftpApi(
       }
   }
 
+  override def statFile(path: String): IO[Option[FileAttributes]] =
+    cs.evalOn(blockingEc)(client.statRemoteFile(path))
+      .map(_.map(attrs => FileAttributes(attrs.getSize, None)))
+
   override def listDirectory(path: String): Stream[IO, (String, FileType)] = {
     val getEntries = cs.evalOn(blockingEc)(client.listRemoteDirectory(path))
 
@@ -123,6 +132,9 @@ object SshjSftpApi {
 
     /** Use SFTP to open an input stream for a remote file, starting at an offset. */
     def openRemoteFile(path: String, offset: Long): Resource[IO, InputStream]
+
+    /** Use SFTP to check if a remote file exists, returning its info if so. */
+    def statRemoteFile(path: String): IO[Option[RawAttributes]]
 
     /** Use SFTP to list the contents of a remote directory. */
     def listRemoteDirectory(path: String): IO[List[RemoteResourceInfo]]
@@ -205,6 +217,11 @@ object SshjSftpApi {
           cs.evalOn(blockingEc)(IO.delay(sftp.open(path))).map { file =>
             new file.RemoteFileInputStream(offset)
           }
+        }
+
+      override def statRemoteFile(path: String): IO[Option[RawAttributes]] =
+        connectToHost(loginInfo, blockingEc).use { sftp =>
+          IO.delay(sftp.statExistence(path)).map(Option.apply)
         }
 
       override def listRemoteDirectory(path: String): IO[List[RemoteResourceInfo]] =

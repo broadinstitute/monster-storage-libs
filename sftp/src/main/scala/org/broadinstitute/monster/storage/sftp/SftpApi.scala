@@ -2,7 +2,7 @@ package org.broadinstitute.monster.storage.sftp
 
 import cats.effect.IO
 import fs2.Stream
-import org.broadinstitute.monster.storage.common.FileType
+import org.broadinstitute.monster.storage.common.{FileAttributes, FileType}
 
 /**
   * Client which can perform I/O operations against an SFTP site.
@@ -26,6 +26,13 @@ trait SftpApi {
     fromByte: Long = 0L,
     untilByte: Option[Long] = None
   ): Stream[IO, Byte]
+
+  /**
+    * Check if an SFTP file exists, returning useful attributes about it if so.
+    *
+    * @param path path within the configured SFTP site pointing to the potential file.
+    */
+  def statFile(path: String): IO[Option[FileAttributes]]
 
   /**
     * List the contents of an SFTP directory.

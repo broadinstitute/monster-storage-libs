@@ -10,7 +10,11 @@ import io.circe.{Json, JsonObject}
 import io.circe.jawn.JawnParser
 import io.circe.syntax._
 import org.apache.commons.codec.binary.{Base64, Hex}
-import org.broadinstitute.monster.storage.common.{FileType, OperationStatus}
+import org.broadinstitute.monster.storage.common.{
+  FileAttributes,
+  FileType,
+  OperationStatus
+}
 import org.http4s._
 import org.http4s.client.Client
 import org.http4s.headers._
@@ -137,19 +141,21 @@ private[gcs] class JsonHttpGcsApi(
     }
   }
 
-  override def statObject(bucket: String, path: String): IO[(Boolean, Option[String])] =
+  override def statObject(bucket: String, path: String): IO[Option[FileAttributes]] =
     getObjectMetadata(bucket, path).use { response =>
       if (response.status == Status.NotFound) {
-        IO.pure((false, None))
+        IO.pure(None)
       } else if (response.status.isSuccess) {
-        for {
-          byteChunk <- response.body.compile.toChunk
-          objectMetadata <- parser
-            .parseByteBuffer(byteChunk.toByteBuffer)
-            .flatMap(_.as[JsonObject])
-            .liftTo[IO]
-        } yield {
-          (true, objectMetadata(ObjectMd5Key).flatMap(_.asString))
+        response.body.compile.toChunk.flatMap { byteChunk =>
+          val parseMetadata = for {
+            objectMetadata <- parser.parseByteBuffer(byteChunk.toByteBuffer)
+            objectCursor = objectMetadata.hcursor
+            objectSize <- objectCursor.get[Long](ObjectSizeKey)
+            objectMd5 <- objectCursor.get[Option[String]](ObjectMd5Key)
+          } yield {
+            Some(FileAttributes(objectSize, objectMd5))
+          }
+          parseMetadata.liftTo[IO]
         }
       } else {
         GcsFailure.raise(response, s"Failed to get object metadata from $path in $bucket")

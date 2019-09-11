@@ -11,7 +11,7 @@ import com.google.cloud.storage.Storage.BlobListOption
 import com.google.cloud.storage.{BlobId, BlobInfo, StorageOptions}
 import fs2.{Chunk, Stream}
 import org.apache.commons.codec.digest.DigestUtils
-import org.broadinstitute.monster.storage.common.FileType
+import org.broadinstitute.monster.storage.common.{FileAttributes, FileType}
 import org.http4s.{MediaType, Status}
 import org.http4s.client.blaze.BlazeClientBuilder
 import org.http4s.client.middleware.Logger
@@ -561,16 +561,17 @@ class JsonHttpGcsApiIntegrationSpec
     }
   }
 
-  it should "check if a GCS object exists and return true with an md5" in {
+  it should "check if a GCS object exists and return its size + md5" in {
     val checks = for {
       bodyChunk <- bodyText(chunkSize.toLong).compile.toChunk
       objectExists <- writeGzippedTestFile(bodyChunk).use { blob =>
         withClient { api =>
           api.statObject(blob.getBucket, blob.getName).map {
-            case (reportsObjectExists, reportedMd5) =>
-              gcsExists(blob) && reportsObjectExists && reportedMd5.get == gcsClient
-                .get(blob)
-                .getMd5
+            case Some(FileAttributes(size, Some(md5))) =>
+              gcsExists(blob) &&
+                size == chunkSize.toLong &&
+                md5 == gcsClient.get(blob).getMd5
+            case _ => ???
           }
         }
       }
@@ -588,8 +589,8 @@ class JsonHttpGcsApiIntegrationSpec
       objectExists <- writeGzippedTestFile(bodyChunk).use { blob =>
         withClient { api =>
           api.statObject(blob.getBucket, path).map {
-            case (reportsObjectExists, reportedMd5) =>
-              !(gcsExists(blob) && reportsObjectExists) && reportedMd5.isEmpty
+            case None => !gcsExists(blob)
+            case _    => ???
           }
         }
       }

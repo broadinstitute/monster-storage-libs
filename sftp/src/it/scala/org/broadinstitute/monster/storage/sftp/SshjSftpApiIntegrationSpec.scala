@@ -2,12 +2,16 @@ package org.broadinstitute.monster.storage.sftp
 
 import cats.effect.{ContextShift, IO, Timer}
 import fs2.Stream
-import org.broadinstitute.monster.storage.common.FileType
-import org.scalatest.{EitherValues, FlatSpec, Matchers}
+import org.broadinstitute.monster.storage.common.{FileAttributes, FileType}
+import org.scalatest.{EitherValues, FlatSpec, Matchers, OptionValues}
 
 import scala.concurrent.ExecutionContext
 
-class SshjSftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValues {
+class SshjSftpApiIntegrationSpec
+    extends FlatSpec
+    with Matchers
+    with EitherValues
+    with OptionValues {
 
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
   private implicit val t: Timer[IO] = IO.timer(ExecutionContext.global)
@@ -114,6 +118,20 @@ class SshjSftpApiIntegrationSpec extends FlatSpec with Matchers with EitherValue
     val errCause = bytesOrError.left.value.getCause
     errMessage should include(fakePath)
     errCause.getMessage should include("not found")
+  }
+
+  it should "stat remote files" in {
+    val attributes =
+      getClient().evalMap(_.statFile(testPath)).compile.lastOrError.unsafeRunSync()
+
+    attributes.value shouldBe FileAttributes(testContent.length.toLong, None)
+  }
+
+  it should "not break when stat-ing nonexistent remote files" in {
+    val attributes =
+      getClient().evalMap(_.statFile("foobar")).compile.lastOrError.unsafeRunSync()
+
+    attributes shouldBe None
   }
 
   it should "list directories" in {

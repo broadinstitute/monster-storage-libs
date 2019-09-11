@@ -2,7 +2,7 @@ package org.broadinstitute.monster.storage.gcs
 
 import cats.effect.IO
 import fs2.Stream
-import org.broadinstitute.monster.storage.common.FileType
+import org.broadinstitute.monster.storage.common.{FileAttributes, FileType}
 import org.http4s.headers._
 
 /** Client which can perform I/O operations against Google Cloud Storage. */
@@ -34,7 +34,7 @@ trait GcsApi {
     * @return a boolean indicating if an object exists at `path` in `bucket`, and the
     *         md5 of the object if Google calculated one during the upload
     */
-  def statObject(bucket: String, path: String): IO[(Boolean, Option[String])]
+  def statObject(bucket: String, path: String): IO[Option[FileAttributes]]
 
   /**
     * Create a new object in GCS.

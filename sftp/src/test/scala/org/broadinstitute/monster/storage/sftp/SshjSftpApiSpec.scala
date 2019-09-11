@@ -4,15 +4,24 @@ import java.io.{ByteArrayInputStream, IOException, InputStream}
 
 import cats.effect.{ContextShift, IO, Resource, Timer}
 import net.schmizz.sshj.common.SSHException
-import net.schmizz.sshj.sftp.{FileAttributes, FileMode, RemoteResourceInfo}
-import org.broadinstitute.monster.storage.common.FileType
+import net.schmizz.sshj.sftp.{
+  FileMode,
+  RemoteResourceInfo,
+  FileAttributes => RawAttributes
+}
+import org.broadinstitute.monster.storage.common.{FileAttributes, FileType}
 import org.scalamock.scalatest.MockFactory
-import org.scalatest.{EitherValues, FlatSpec, Matchers}
+import org.scalatest.{EitherValues, FlatSpec, Matchers, OptionValues}
 
 import scala.concurrent.ExecutionContext
 import scala.concurrent.duration.Duration
 
-class SshjSftpApiSpec extends FlatSpec with Matchers with MockFactory with EitherValues {
+class SshjSftpApiSpec
+    extends FlatSpec
+    with Matchers
+    with MockFactory
+    with EitherValues
+    with OptionValues {
 
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
   private implicit val t: Timer[IO] = IO.timer(ExecutionContext.global)
@@ -201,6 +210,31 @@ class SshjSftpApiSpec extends FlatSpec with Matchers with MockFactory with Eithe
     bytesOrError.left.value.getMessage should include(fakePath)
   }
 
+  it should "stat remote files" in {
+    val expectedSize = 9876L
+
+    val fakeAttrs = new RawAttributes.Builder().withSize(expectedSize).build()
+    val fakeSftp = mock[SshjSftpApi.Client]
+    (fakeSftp.statRemoteFile _).expects(fakePath).returning(IO.pure(Some(fakeAttrs)))
+
+    val api =
+      new SshjSftpApi(fakeSftp, ExecutionContext.global, fakeChunkSize, 0, Duration.Zero)
+    val attrs = api.statFile(fakePath).unsafeRunSync()
+
+    attrs.value shouldBe FileAttributes(expectedSize, None)
+  }
+
+  it should "not break when stat-ing nonexistent remote files" in {
+    val fakeSftp = mock[SshjSftpApi.Client]
+    (fakeSftp.statRemoteFile _).expects(fakePath).returning(IO.pure(None))
+
+    val api =
+      new SshjSftpApi(fakeSftp, ExecutionContext.global, fakeChunkSize, 0, Duration.Zero)
+    val attrs = api.statFile(fakePath).unsafeRunSync()
+
+    attrs shouldBe None
+  }
+
   it should "list remote directories" in {
     val fakeContents =
       List(
@@ -214,7 +248,7 @@ class SshjSftpApiSpec extends FlatSpec with Matchers with MockFactory with Eithe
       IO.pure {
         fakeContents.map {
           case (name, tpe) =>
-            val attrs = new FileAttributes.Builder().withType(tpe).build()
+            val attrs = new RawAttributes.Builder().withType(tpe).build()
 
             val info = stub[RemoteResourceInfo]
             (info.getPath _).when().returns(name)
