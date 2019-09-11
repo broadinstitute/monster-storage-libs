@@ -453,7 +453,7 @@ private[gcs] class JsonHttpGcsApi(
         case OperationStatus.Done =>
           IO.pure(None)
       }
-        // Make sure there's at least one element in the result stream.
+      // Make sure there's at least one element in the result stream.
       .pull
       .uncons1
       .flatMap {
