@@ -2,30 +2,29 @@ package org.broadinstitute.monster.storage.sftp
 
 import java.io.InputStream
 
-import cats.effect.{ContextShift, IO, Resource, Timer}
+import cats.effect.{Blocker, ContextShift, IO, Resource, Timer}
 import cats.implicits._
 import fs2.{Chunk, Stream}
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
 import net.schmizz.sshj.SSHClient
 import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.sftp.{
-  FileAttributes => RawAttributes,
   FileMode,
   RemoteResourceInfo,
-  SFTPClient
+  SFTPClient,
+  FileAttributes => RawAttributes
 }
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import org.broadinstitute.monster.storage.common.{FileAttributes, FileType}
 
 import scala.collection.JavaConverters._
-import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
 
 /**
   * Concrete implementation of a client that can interact with SFT sites using the sshj library.
   *
   * @param client thin wrapper around the sshj client, for better test-ability
-  * @param blockingEc thread pool to run all blocking operations on
+  * @param blocker thread pool to run all blocking operations on
   * @param readChunkSize chunk size to use when converting `InputStream`s of file contents into
   *                      fs2 streams
   * @param maxRetries max times to reopen a remote connection after the server severs the data
@@ -34,7 +33,7 @@ import scala.concurrent.duration._
   */
 private[sftp] class SshjSftpApi(
   client: SshjSftpApi.Client,
-  blockingEc: ExecutionContext,
+  blocker: Blocker,
   readChunkSize: Int,
   maxRetries: Int,
   retryDelay: FiniteDuration
@@ -59,7 +58,7 @@ private[sftp] class SshjSftpApi(
       Stream.eval(logger.info(s"Opening $path at byte $start")) >>
         Stream.resource(client.openRemoteFile(path, start)).flatMap { inStream =>
           fs2.io
-            .readInputStream(IO.pure(inStream), readChunkSize, blockingEc)
+            .readInputStream(IO.pure(inStream), readChunkSize, blocker)
             .chunks
             .attempt
             .scan(start -> Either.right[Throwable, Chunk[Byte]](Chunk.empty)) {
@@ -90,11 +89,12 @@ private[sftp] class SshjSftpApi(
   }
 
   override def statFile(path: String): IO[Option[FileAttributes]] =
-    cs.evalOn(blockingEc)(client.statRemoteFile(path))
+    blocker
+      .blockOn(client.statRemoteFile(path))
       .map(_.map(attrs => FileAttributes(attrs.getSize, None)))
 
   override def listDirectory(path: String): Stream[IO, (String, FileType)] = {
-    val getEntries = cs.evalOn(blockingEc)(client.listRemoteDirectory(path))
+    val getEntries = blocker.blockOn(client.listRemoteDirectory(path))
 
     Stream
       .eval(getEntries)
@@ -144,16 +144,16 @@ object SshjSftpApi {
     * Build a resource which will connect to a remote host over SSH, authenticate
     * with the site, then create an SFTP client for the host.
     */
-  private def connectToHost(loginInfo: SftpLoginInfo, blockingEc: ExecutionContext)(
+  private def connectToHost(loginInfo: SftpLoginInfo, blocker: Blocker)(
     implicit cs: ContextShift[IO]
   ): Resource[IO, SFTPClient] = {
-    val sshSetup = cs
-      .evalOn(blockingEc)(IO.delay(new SSHClient()))
+    val sshSetup = blocker
+      .blockOn(IO.delay(new SSHClient()))
       .flatTap(ssh => IO.delay(ssh.addHostKeyVerifier(new PromiscuousVerifier())))
-    val sshTeardown = (ssh: SSHClient) => cs.evalOn(blockingEc)(IO.delay(ssh.close()))
+    val sshTeardown = (ssh: SSHClient) => blocker.blockOn(IO.delay(ssh.close()))
 
     Resource.make(sshSetup)(sshTeardown).flatMap { ssh =>
-      val sshConnect = cs.evalOn(blockingEc) {
+      val sshConnect = blocker.blockOn {
         for {
           _ <- IO.delay(ssh.connect(loginInfo.host, loginInfo.port)).adaptError {
             case err =>
@@ -176,12 +176,12 @@ object SshjSftpApi {
         }
       }
       val sshDisconnect =
-        (ssh: SSHClient) => cs.evalOn(blockingEc)(IO.delay(ssh.disconnect()))
+        (ssh: SSHClient) => blocker.blockOn(IO.delay(ssh.disconnect()))
 
       Resource.make(sshConnect)(sshDisconnect).flatMap { connectedSsh =>
-        val sftpSetup = cs.evalOn(blockingEc)(IO.delay(connectedSsh.newSFTPClient()))
+        val sftpSetup = blocker.blockOn(IO.delay(connectedSsh.newSFTPClient()))
         val sftpTeardown =
-          (sftp: SFTPClient) => cs.evalOn(blockingEc)(IO.delay(sftp.close()))
+          (sftp: SFTPClient) => blocker.blockOn(IO.delay(sftp.close()))
 
         Resource.make(sftpSetup)(sftpTeardown)
       }
@@ -193,11 +193,11 @@ object SshjSftpApi {
     *
     * @param loginInfo configuration determining which SFTP site the client will
     *                  connect to
-    * @param blockingEc execution context the client should use for all blocking I/O
+    * @param blocker execution context the client should use for all blocking I/O
     */
   def build(
     loginInfo: SftpLoginInfo,
-    blockingEc: ExecutionContext,
+    blocker: Blocker,
     readChunkSize: Int = DefaultReadChunkSize,
     maxRetries: Int = DefaultMaxRetries,
     retryDelay: FiniteDuration = DefaultRetryDelay
@@ -213,25 +213,25 @@ object SshjSftpApi {
      */
     val realClient = new Client {
       override def openRemoteFile(path: String, offset: Long): Resource[IO, InputStream] =
-        connectToHost(loginInfo, blockingEc).evalMap { sftp =>
-          cs.evalOn(blockingEc)(IO.delay(sftp.open(path))).map { file =>
+        connectToHost(loginInfo, blocker).evalMap { sftp =>
+          blocker.blockOn(IO.delay(sftp.open(path))).map { file =>
             new file.RemoteFileInputStream(offset)
           }
         }
 
       override def statRemoteFile(path: String): IO[Option[RawAttributes]] =
-        connectToHost(loginInfo, blockingEc).use { sftp =>
+        connectToHost(loginInfo, blocker).use { sftp =>
           IO.delay(sftp.statExistence(path)).map(Option.apply)
         }
 
       override def listRemoteDirectory(path: String): IO[List[RemoteResourceInfo]] =
-        connectToHost(loginInfo, blockingEc).use { sftp =>
+        connectToHost(loginInfo, blocker).use { sftp =>
           IO.delay(sftp.ls(path)).map(_.asScala.toList)
         }
     }
 
     Resource.pure(
-      new SshjSftpApi(realClient, blockingEc, readChunkSize, maxRetries, retryDelay)
+      new SshjSftpApi(realClient, blocker, readChunkSize, maxRetries, retryDelay)
     )
   }
 }

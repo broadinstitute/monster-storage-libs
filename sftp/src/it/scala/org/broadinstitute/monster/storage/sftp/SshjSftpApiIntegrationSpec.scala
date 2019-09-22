@@ -1,6 +1,6 @@
 package org.broadinstitute.monster.storage.sftp
 
-import cats.effect.{ContextShift, IO, Timer}
+import cats.effect.{Blocker, ContextShift, IO, Timer}
 import fs2.Stream
 import org.broadinstitute.monster.storage.common.{FileAttributes, FileType}
 import org.scalatest.{EitherValues, FlatSpec, Matchers, OptionValues}
@@ -36,7 +36,9 @@ class SshjSftpApiIntegrationSpec
   ).mkString("\r\n")
 
   def getClient(info: SftpLoginInfo = testLogin): Stream[IO, SftpApi] =
-    Stream.resource(SshjSftpApi.build(info, ExecutionContext.global))
+    Stream.resource(
+      SshjSftpApi.build(info, Blocker.liftExecutionContext(ExecutionContext.global))
+    )
 
   behavior of "SftpApi"
 

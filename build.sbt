@@ -2,24 +2,24 @@
 val betterMonadicForVersion = "0.3.1"
 
 // Data types & control flow.
-val catsVersion = "1.6.0"
-val catsEffectVersion = "1.2.0"
+val catsVersion = "2.0.0"
+val catsEffectVersion = "2.0.0"
 val enumeratumVersion = "1.5.13"
-val fs2Version = "1.0.5"
+val fs2Version = "2.0.1"
 
 // JSON.
-val circeVersion = "0.11.1"
-val circeDerivationVersion = "0.11.0-M3"
+val circeVersion = "0.12.1"
+val circeDerivationVersion = "0.12.0-M6"
 
 // Logging.
 val logbackVersion = "1.2.3"
-val log4CatsVersion = "0.3.0"
+val log4CatsVersion = "1.0.0"
 
 // Web.
 val commonsCodecVersion = "1.13"
 val commonsNetVersion = "3.6"
 val googleAuthVersion = "0.17.1"
-val http4sVersion = "0.20.10"
+val http4sVersion = "0.21.0-M5"
 val sshJVersion = "0.27.0"
 
 // Testing.
@@ -57,7 +57,7 @@ lazy val `gcs-lib` = project
       "io.circe" %% "circe-core" % circeVersion,
       "io.circe" %% "circe-derivation" % circeDerivationVersion,
       "io.circe" %% "circe-parser" % circeVersion,
-      "org.http4s" %% "http4s-blaze-client" % http4sVersion
+      "org.http4s" %% "http4s-client" % http4sVersion
     ),
     // All tests.
     libraryDependencies ++= Seq(
@@ -66,7 +66,8 @@ lazy val `gcs-lib` = project
     // Integration tests only.
     libraryDependencies ++= Seq(
       "com.bettercloud" % "vault-java-driver" % vaultDriverVersion,
-      "com.google.cloud" % "google-cloud-storage" % googleCloudJavaVersion
+      "com.google.cloud" % "google-cloud-storage" % googleCloudJavaVersion,
+      "org.http4s" %% "http4s-blaze-client" % http4sVersion
     ).map(_ % IntegrationTest),
     // Pin important transitive dependencies to avoid chaos.
     dependencyOverrides := Seq(

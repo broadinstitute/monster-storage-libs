@@ -18,6 +18,7 @@ import org.broadinstitute.monster.storage.common.{
 import org.http4s._
 import org.http4s.client.Client
 import org.http4s.headers._
+import org.http4s.implicits._
 import org.http4s.multipart.Boundary
 import org.http4s.util.CaseInsensitiveString
 

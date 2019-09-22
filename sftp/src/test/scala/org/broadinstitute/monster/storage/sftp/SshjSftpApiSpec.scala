@@ -2,7 +2,7 @@ package org.broadinstitute.monster.storage.sftp
 
 import java.io.{ByteArrayInputStream, IOException, InputStream}
 
-import cats.effect.{ContextShift, IO, Resource, Timer}
+import cats.effect.{Blocker, ContextShift, IO, Resource, Timer}
 import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.sftp.{
   FileMode,
@@ -30,6 +30,7 @@ class SshjSftpApiSpec
   private val fakePath = s"$fakeDir/file"
   private val fakeContents = "some text"
   private val fakeChunkSize = 128
+  private val blocker = Blocker.liftExecutionContext(ExecutionContext.global)
 
   behavior of "SftpApi"
 
@@ -40,7 +41,7 @@ class SshjSftpApiSpec
       .returning(Resource.pure(new ByteArrayInputStream(fakeContents.getBytes())))
 
     val api =
-      new SshjSftpApi(fakeSftp, ExecutionContext.global, fakeChunkSize, 0, Duration.Zero)
+      new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 0, Duration.Zero)
     val bytes = api.readFile(fakePath).compile.toChunk.unsafeRunSync()
 
     bytes.toArray shouldBe fakeContents.getBytes()
@@ -56,7 +57,7 @@ class SshjSftpApiSpec
       .returning(Resource.pure(new ByteArrayInputStream(expectedBytes)))
 
     val api =
-      new SshjSftpApi(fakeSftp, ExecutionContext.global, fakeChunkSize, 0, Duration.Zero)
+      new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 0, Duration.Zero)
     val bytes =
       api.readFile(fakePath, expectedOffset.toLong).compile.toChunk.unsafeRunSync()
 
@@ -70,7 +71,7 @@ class SshjSftpApiSpec
       .returning(Resource.pure(new ByteArrayInputStream(fakeContents.getBytes())))
 
     val api =
-      new SshjSftpApi(fakeSftp, ExecutionContext.global, fakeChunkSize, 0, Duration.Zero)
+      new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 0, Duration.Zero)
     val bytes =
       api
         .readFile(fakePath, untilByte = Some(3L))
@@ -91,7 +92,7 @@ class SshjSftpApiSpec
       .returning(Resource.pure(new ByteArrayInputStream(expectedBytes)))
 
     val api =
-      new SshjSftpApi(fakeSftp, ExecutionContext.global, fakeChunkSize, 0, Duration.Zero)
+      new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 0, Duration.Zero)
     val bytes =
       api
         .readFile(fakePath, expectedOffset.toLong, untilByte = Some(5L))
@@ -138,7 +139,7 @@ class SshjSftpApiSpec
       .returning(Resource.pure(inStream2))
 
     val api =
-      new SshjSftpApi(fakeSftp, ExecutionContext.global, fakeChunkSize, 1, Duration.Zero)
+      new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 1, Duration.Zero)
     val bytes = api
       .readFile(fakePath, fromByte = expectedOffset.toLong, untilByte = Some(7L))
       .compile
@@ -167,7 +168,7 @@ class SshjSftpApiSpec
       .returning(Resource.pure(inStream))
 
     val api =
-      new SshjSftpApi(fakeSftp, ExecutionContext.global, fakeChunkSize, 1, Duration.Zero)
+      new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 1, Duration.Zero)
     val bytesOrError = api.readFile(fakePath).compile.toChunk.attempt.unsafeRunSync()
 
     bytesOrError.left.value.getMessage should include(fakePath)
@@ -199,7 +200,7 @@ class SshjSftpApiSpec
       .returning(Resource.pure(inStream1))
 
     val api =
-      new SshjSftpApi(fakeSftp, ExecutionContext.global, fakeChunkSize, 1, Duration.Zero)
+      new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 1, Duration.Zero)
     val bytesOrError = api
       .readFile(fakePath, fromByte = expectedOffset.toLong)
       .compile
@@ -218,7 +219,7 @@ class SshjSftpApiSpec
     (fakeSftp.statRemoteFile _).expects(fakePath).returning(IO.pure(Some(fakeAttrs)))
 
     val api =
-      new SshjSftpApi(fakeSftp, ExecutionContext.global, fakeChunkSize, 0, Duration.Zero)
+      new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 0, Duration.Zero)
     val attrs = api.statFile(fakePath).unsafeRunSync()
 
     attrs.value shouldBe FileAttributes(expectedSize, None)
@@ -229,7 +230,7 @@ class SshjSftpApiSpec
     (fakeSftp.statRemoteFile _).expects(fakePath).returning(IO.pure(None))
 
     val api =
-      new SshjSftpApi(fakeSftp, ExecutionContext.global, fakeChunkSize, 0, Duration.Zero)
+      new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 0, Duration.Zero)
     val attrs = api.statFile(fakePath).unsafeRunSync()
 
     attrs shouldBe None
@@ -260,7 +261,7 @@ class SshjSftpApiSpec
     }
 
     val api =
-      new SshjSftpApi(fakeSftp, ExecutionContext.global, fakeChunkSize, 0, Duration.Zero)
+      new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 0, Duration.Zero)
     val contents = api.listDirectory(fakeDir).compile.toList.unsafeRunSync()
     contents should contain theSameElementsAs List(
       fakePath -> FileType.File,
@@ -274,7 +275,7 @@ class SshjSftpApiSpec
     val fakeSftp = mock[SshjSftpApi.Client]
     (fakeSftp.listRemoteDirectory _).expects(fakeDir).returning(IO.pure(Nil))
     val api =
-      new SshjSftpApi(fakeSftp, ExecutionContext.global, fakeChunkSize, 0, Duration.Zero)
+      new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 0, Duration.Zero)
     val contents = api.listDirectory(fakeDir).compile.toList.unsafeRunSync()
     contents shouldBe empty
   }
