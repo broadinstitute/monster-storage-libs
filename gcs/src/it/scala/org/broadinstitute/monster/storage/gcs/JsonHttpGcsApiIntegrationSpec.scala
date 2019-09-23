@@ -13,8 +13,8 @@ import fs2.{Chunk, Stream}
 import org.apache.commons.codec.digest.DigestUtils
 import org.broadinstitute.monster.storage.common.FileType
 import org.http4s.{MediaType, Status}
-import org.http4s.client.blaze.BlazeClientBuilder
 import org.http4s.client.middleware.Logger
+import org.http4s.client.blaze.BlazeClientBuilder
 import org.http4s.headers._
 import org.scalatest.{BeforeAndAfterAll, EitherValues, FlatSpec, Matchers, OptionValues}
 

@@ -1,6 +1,6 @@
 package org.broadinstitute.monster.storage.ftp
 
-import cats.effect.{ContextShift, IO, Timer}
+import cats.effect.{Blocker, ContextShift, IO, Timer}
 import fs2.Stream
 import org.broadinstitute.monster.storage.common.FileType
 import org.scalatest.{EitherValues, FlatSpec, Matchers}
@@ -124,7 +124,9 @@ class CommonsNetFtpApiIntegrationSpec extends FlatSpec with Matchers with Either
   private val testEmptyDir = "pub/README"
 
   private def getClient(info: FtpConnectionInfo = testInfo): Stream[IO, FtpApi] =
-    Stream.resource(CommonsNetFtpApi.build(info, ExecutionContext.global))
+    Stream.resource(
+      CommonsNetFtpApi.build(info, Blocker.liftExecutionContext(ExecutionContext.global))
+    )
 
   behavior of "CommonsNetFtpApi"
 

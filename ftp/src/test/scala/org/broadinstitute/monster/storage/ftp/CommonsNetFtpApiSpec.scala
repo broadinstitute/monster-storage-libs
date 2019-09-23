@@ -2,7 +2,7 @@ package org.broadinstitute.monster.storage.ftp
 
 import java.io.{ByteArrayInputStream, IOException, InputStream}
 
-import cats.effect.{ContextShift, IO, Resource, Timer}
+import cats.effect.{Blocker, ContextShift, IO, Resource, Timer}
 import org.apache.commons.net.ftp.{FTPConnectionClosedException, FTPFile}
 import org.broadinstitute.monster.storage.common.FileType
 import org.scalamock.scalatest.MockFactory
@@ -24,6 +24,7 @@ class CommonsNetFtpApiSpec
   private val fakePath = s"$fakeDir/file"
   private val fakeContents = "some text"
   private val fakeChunkSize = 128
+  private val blocker = Blocker.liftExecutionContext(ExecutionContext.global)
 
   behavior of "CommonsNetFtpApi"
 
@@ -35,7 +36,7 @@ class CommonsNetFtpApiSpec
 
     val api = new CommonsNetFtpApi(
       fakeFtp,
-      ExecutionContext.global,
+      blocker,
       fakeChunkSize,
       0,
       Duration.Zero
@@ -53,7 +54,7 @@ class CommonsNetFtpApiSpec
 
     val api = new CommonsNetFtpApi(
       fakeFtp,
-      ExecutionContext.global,
+      blocker,
       fakeChunkSize,
       0,
       Duration.Zero
@@ -72,7 +73,7 @@ class CommonsNetFtpApiSpec
 
     val api = new CommonsNetFtpApi(
       fakeFtp,
-      ExecutionContext.global,
+      blocker,
       fakeChunkSize,
       0,
       Duration.Zero
@@ -94,7 +95,7 @@ class CommonsNetFtpApiSpec
 
     val api = new CommonsNetFtpApi(
       fakeFtp,
-      ExecutionContext.global,
+      blocker,
       fakeChunkSize,
       0,
       Duration.Zero
@@ -118,7 +119,7 @@ class CommonsNetFtpApiSpec
 
     val api = new CommonsNetFtpApi(
       fakeFtp,
-      ExecutionContext.global,
+      blocker,
       fakeChunkSize,
       0,
       Duration.Zero
@@ -169,7 +170,7 @@ class CommonsNetFtpApiSpec
 
     val api = new CommonsNetFtpApi(
       fakeFtp,
-      ExecutionContext.global,
+      blocker,
       fakeChunkSize,
       1,
       Duration.Zero
@@ -203,7 +204,7 @@ class CommonsNetFtpApiSpec
 
     val api = new CommonsNetFtpApi(
       fakeFtp,
-      ExecutionContext.global,
+      blocker,
       fakeChunkSize,
       1,
       Duration.Zero
@@ -239,7 +240,7 @@ class CommonsNetFtpApiSpec
 
     val api = new CommonsNetFtpApi(
       fakeFtp,
-      ExecutionContext.global,
+      blocker,
       fakeChunkSize,
       1,
       Duration.Zero
@@ -270,7 +271,7 @@ class CommonsNetFtpApiSpec
 
     val api = new CommonsNetFtpApi(
       fakeFtp,
-      ExecutionContext.global,
+      blocker,
       fakeChunkSize,
       0,
       Duration.Zero
@@ -297,7 +298,7 @@ class CommonsNetFtpApiSpec
 
     val api = new CommonsNetFtpApi(
       fakeFtp,
-      ExecutionContext.global,
+      blocker,
       fakeChunkSize,
       0,
       Duration.Zero
@@ -314,7 +315,7 @@ class CommonsNetFtpApiSpec
 
     val api = new CommonsNetFtpApi(
       fakeFtp,
-      ExecutionContext.global,
+      blocker,
       fakeChunkSize,
       0,
       Duration.Zero

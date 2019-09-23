@@ -2,21 +2,20 @@ package org.broadinstitute.monster.storage.ftp
 
 import java.io.InputStream
 
-import cats.effect.{ContextShift, IO, Resource, Timer}
+import cats.effect.{Blocker, ContextShift, IO, Resource, Timer}
 import cats.implicits._
 import fs2.{Chunk, Stream}
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
 import org.apache.commons.net.ftp._
 import org.broadinstitute.monster.storage.common.FileType
 
-import scala.concurrent.ExecutionContext
 import scala.concurrent.duration._
 
 /**
   * Concrete implementation of a client that can interact with FTP sites using Apache's commons-net library.
   *
   * @param client thin wrapper around the Apache client, for better test-ability
-  * @param blockingEc thread pool to run all blocking operations on
+  * @param blocker thread pool to run all blocking operations on
   * @param readChunkSize chunk size to use when converting `InputStream`s of file contents into
   *                      fs2 streams
   * @param maxRetries max times to reopen a remote connection after the server severs the data connection
@@ -24,7 +23,7 @@ import scala.concurrent.duration._
   */
 private[ftp] class CommonsNetFtpApi(
   client: CommonsNetFtpApi.Client,
-  blockingEc: ExecutionContext,
+  blocker: Blocker,
   readChunkSize: Int,
   maxRetries: Int,
   retryDelay: FiniteDuration
@@ -57,7 +56,7 @@ private[ftp] class CommonsNetFtpApi(
       }
 
       fs2.io
-        .readInputStream(getByteStream, readChunkSize, blockingEc)
+        .readInputStream(getByteStream, readChunkSize, blocker)
         .chunks
         .attempt
         .scan(start -> Either.right[Throwable, Chunk[Byte]](Chunk.empty)) {
@@ -166,9 +165,9 @@ object CommonsNetFtpApi {
     */
   private def connectToSite(
     connectionInfo: FtpConnectionInfo,
-    blockingEc: ExecutionContext
+    blocker: Blocker
   )(implicit cs: ContextShift[IO]): Resource[IO, FTPClient] = {
-    val setup = cs.evalOn(blockingEc) {
+    val setup = blocker.blockOn {
       IO.delay {
         val client = new FTPClient()
         client.setBufferSize(ClientBufferSize)
@@ -183,36 +182,35 @@ object CommonsNetFtpApi {
           )
       }
     }
-    val teardown = (ftp: FTPClient) => cs.evalOn(blockingEc)(IO.delay(ftp.disconnect()))
+    val teardown = (ftp: FTPClient) => blocker.blockOn(IO.delay(ftp.disconnect()))
 
     Resource.make(setup)(teardown).flatMap { ftp =>
       // Connect signals failure by setting a field in the class (?!)
       val reply = ftp.getReplyCode
       val login = if (FTPReply.isPositiveCompletion(reply)) {
-        cs.evalOn(blockingEc) {
-            IO.delay {
-              ftp.login(connectionInfo.username, connectionInfo.password) &&
-              /*
-               * VERY IMPORTANT: FTP servers distinguish requests for ASCII data
-               * from requests for "binary" data. If the client asks for ASCII,
-               * line endings will be re-written to the system default in-transit,
-               * and transfer offsets will either be ignored or converted to a
-               * character offset.
-               */
-              ftp.setFileType(FTP.BINARY_FILE_TYPE)
-            }
+        blocker.blockOn {
+          IO.delay {
+            ftp.login(connectionInfo.username, connectionInfo.password) &&
+            /*
+             * VERY IMPORTANT: FTP servers distinguish requests for ASCII data
+             * from requests for "binary" data. If the client asks for ASCII,
+             * line endings will be re-written to the system default in-transit,
+             * and transfer offsets will either be ignored or converted to a
+             * character offset.
+             */
+            ftp.setFileType(FTP.BINARY_FILE_TYPE)
           }
-          .flatMap { success =>
-            if (success) {
-              IO.pure(ftp)
-            } else {
-              IO.raiseError(
-                new RuntimeException(
-                  s"Failed to log into ${connectionInfo.host} as ${connectionInfo.username}"
-                )
+        }.flatMap { success =>
+          if (success) {
+            IO.pure(ftp)
+          } else {
+            IO.raiseError(
+              new RuntimeException(
+                s"Failed to log into ${connectionInfo.host} as ${connectionInfo.username}"
               )
-            }
+            )
           }
+        }
       } else {
         IO.raiseError(
           new RuntimeException(
@@ -220,7 +218,7 @@ object CommonsNetFtpApi {
           )
         )
       }
-      val logout = (ftp: FTPClient) => cs.evalOn(blockingEc)(IO.delay(ftp.logout()).void)
+      val logout = (ftp: FTPClient) => blocker.blockOn(IO.delay(ftp.logout()).void)
 
       Resource.make(login)(logout).evalMap { ftp =>
         val setDataMode = if (connectionInfo.passiveMode) {
@@ -239,11 +237,11 @@ object CommonsNetFtpApi {
     *
     * @param connectionInfo configuration determining which FTP site the client
     *                       will connect to
-    * @param blockingEc execution context the client should use for all blocking I/O
+    * @param blocker execution context the client should use for all blocking I/O
     */
   def build(
     connectionInfo: FtpConnectionInfo,
-    blockingEc: ExecutionContext,
+    blocker: Blocker,
     readChunkSize: Int = DefaultReadChunkSize,
     maxRetries: Int = DefaultMaxRetries,
     retryDelay: FiniteDuration = DefaultRetryDelay
@@ -258,8 +256,8 @@ object CommonsNetFtpApi {
          * creating a new client per request. If we see a ton of overhead, we might
          * want to investigate maintaining a pool of connected clients.
          */
-        connectToSite(connectionInfo, blockingEc).flatMap { ftp =>
-          val beginCommand = cs.evalOn(blockingEc) {
+        connectToSite(connectionInfo, blocker).flatMap { ftp =>
+          val beginCommand = blocker.blockOn {
             IO.delay {
               ftp.setRestartOffset(offset)
               ftp.retrieveFileStream(path)
@@ -269,7 +267,7 @@ object CommonsNetFtpApi {
             // "complete-pending" is only valid if the byte retrieval succeeded.
             // Attempting to complete when RETR failed will cause an idle timeout.
             if (is.isDefined) {
-              cs.evalOn(blockingEc)(IO.delay(ftp.completePendingCommand())).void
+              blocker.blockOn(IO.delay(ftp.completePendingCommand())).void
             } else {
               IO.unit
             }
@@ -278,22 +276,20 @@ object CommonsNetFtpApi {
         }
 
       override def statRemoteFile(path: String): IO[Option[FTPFile]] =
-        connectToSite(connectionInfo, blockingEc).use { ftp =>
-          cs.evalOn(blockingEc) {
-            IO.delay(ftp.mlistFile(path))
-          }
+        connectToSite(connectionInfo, blocker).use { ftp =>
+          blocker.blockOn(IO.delay(ftp.mlistFile(path)))
         }.map(Option(_))
 
       override def listRemoteDirectory(path: String): IO[List[FTPFile]] =
-        connectToSite(connectionInfo, blockingEc).use { ftp =>
-          cs.evalOn(blockingEc) {
+        connectToSite(connectionInfo, blocker).use { ftp =>
+          blocker.blockOn {
             IO.delay(ftp.listFiles(path, FTPFileFilters.NON_NULL).toList)
           }
         }
     }
 
     Resource.pure(
-      new CommonsNetFtpApi(realClient, blockingEc, readChunkSize, maxRetries, retryDelay)
+      new CommonsNetFtpApi(realClient, blocker, readChunkSize, maxRetries, retryDelay)
     )
   }
 }
