@@ -20,6 +20,7 @@ class SshjSftpApiIntegrationSpec
   private val testLogin =
     SftpLoginInfo("test.rebex.net", 22, "demo", "password")
   private val testPath = "pub/example/readme.txt"
+
   // NOTE: mkString used instead of a multi-line string so we can force the Windows line endings
   private val testContent = List(
     "Welcome,",

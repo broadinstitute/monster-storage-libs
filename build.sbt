@@ -1,6 +1,3 @@
-// Compiler plugins.
-val betterMonadicForVersion = "0.3.1"
-
 // Data types & control flow.
 val catsVersion = "2.0.0"
 val catsEffectVersion = "2.0.0"
@@ -44,11 +41,9 @@ lazy val `common-lib` = project
 
 lazy val `gcs-lib` = project
   .in(file("gcs"))
-  .configs(IntegrationTest)
   .enablePlugins(LibraryPlugin)
   .dependsOn(`common-lib`)
   .settings(
-    Defaults.itSettings,
     // Main code.
     libraryDependencies ++= Seq(
       "ch.qos.logback" % "logback-classic" % logbackVersion,
@@ -80,11 +75,9 @@ lazy val `gcs-lib` = project
 
 lazy val `ftp-lib` = project
   .in(file("ftp"))
-  .configs(IntegrationTest)
   .enablePlugins(LibraryPlugin)
   .dependsOn(`common-lib`)
   .settings(
-    Defaults.itSettings,
     libraryDependencies ++= Seq(
       "ch.qos.logback" % "logback-classic" % logbackVersion,
       "co.fs2" %% "fs2-core" % fs2Version,
@@ -108,11 +101,9 @@ lazy val `ftp-lib` = project
 
 lazy val `sftp-lib` = project
   .in(file("sftp"))
-  .configs(IntegrationTest)
   .enablePlugins(LibraryPlugin)
   .dependsOn(`common-lib`)
   .settings(
-    Defaults.itSettings,
     libraryDependencies ++= Seq(
       "ch.qos.logback" % "logback-classic" % logbackVersion,
       "co.fs2" %% "fs2-core" % fs2Version,

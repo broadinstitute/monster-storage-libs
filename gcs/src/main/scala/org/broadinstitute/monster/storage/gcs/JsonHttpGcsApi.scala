@@ -41,6 +41,7 @@ private[gcs] class JsonHttpGcsApi(
   import JsonHttpGcsApi._
 
   private val parser = new JawnParser()
+
   private val applicationJsonContentType =
     `Content-Type`(MediaType.application.json, Charset.`UTF-8`)
 

@@ -30,6 +30,7 @@ class CommonsNetFtpApiIntegrationSpec extends FlatSpec with Matchers with Either
     "monster@broadinstitute.org"
   )
   private val testPath = "pub/README.ftp"
+
   private val testContent =
     s"""
        |Hello!
@@ -101,6 +102,7 @@ class CommonsNetFtpApiIntegrationSpec extends FlatSpec with Matchers with Either
        |""".stripMargin
 
   private val testDir = "pub/clinvar"
+
   private val testDirContents = List(
     "ClinGen" -> FileType.Directory,
     "ConceptID_history.txt" -> FileType.File,

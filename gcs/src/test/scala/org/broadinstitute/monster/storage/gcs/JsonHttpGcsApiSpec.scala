@@ -54,6 +54,7 @@ class JsonHttpGcsApiSpec
       .map(String.valueOf)
       .flatMap(s => Stream.emits(s.getBytes))
       .take(n)
+
   private def stringify(bytes: Stream[IO, Byte]): IO[String] =
     bytes.through(fs2.text.utf8Decode).compile.toChunk.map(_.toArray[String].mkString(""))
 
