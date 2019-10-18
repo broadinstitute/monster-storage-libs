@@ -127,6 +127,9 @@ object SshjSftpApi {
   /** Time to sleep between connection attempts when retrying a failed transfer. */
   val DefaultRetryDelay: FiniteDuration = 1.second
 
+  /** Number of read requests to keep in-flight at a time for a single transfer stream. */
+  val DefaultReadAhead: Int = 16
+
   /** Thin abstraction over sshj's `SFTPClient`, to enable mocking calls in unit tests. */
   private[sftp] trait Client {
 
@@ -200,7 +203,8 @@ object SshjSftpApi {
     blocker: Blocker,
     readChunkSize: Int = DefaultReadChunkSize,
     maxRetries: Int = DefaultMaxRetries,
-    retryDelay: FiniteDuration = DefaultRetryDelay
+    retryDelay: FiniteDuration = DefaultRetryDelay,
+    readAhead: Int = DefaultReadAhead
   )(
     implicit cs: ContextShift[IO],
     t: Timer[IO]
@@ -215,7 +219,7 @@ object SshjSftpApi {
       override def openRemoteFile(path: String, offset: Long): Resource[IO, InputStream] =
         connectToHost(loginInfo, blocker).evalMap { sftp =>
           blocker.blockOn(IO.delay(sftp.open(path))).map { file =>
-            new file.RemoteFileInputStream(offset)
+            new file.ReadAheadRemoteFileInputStream(readAhead, offset)
           }
         }
 
