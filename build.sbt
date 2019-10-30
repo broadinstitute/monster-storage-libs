@@ -1,6 +1,7 @@
 // Data types & control flow.
 val catsVersion = "2.0.0"
 val catsEffectVersion = "2.0.0"
+val catsRetryVersion = "0.3.1"
 val enumeratumVersion = "1.5.13"
 val fs2Version = "2.0.1"
 
@@ -108,6 +109,8 @@ lazy val `sftp-lib` = project
       "ch.qos.logback" % "logback-classic" % logbackVersion,
       "co.fs2" %% "fs2-core" % fs2Version,
       "co.fs2" %% "fs2-io" % fs2Version,
+      "com.github.cb372" %% "cats-retry-core" % catsRetryVersion,
+      "com.github.cb372" %% "cats-retry-cats-effect" % catsRetryVersion,
       "com.hierynomus" % "sshj" % sshJVersion,
       "io.chrisdavenport" %% "log4cats-slf4j" % log4CatsVersion
     ),

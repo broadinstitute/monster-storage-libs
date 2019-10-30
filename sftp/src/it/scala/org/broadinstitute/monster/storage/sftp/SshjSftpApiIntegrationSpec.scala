@@ -38,7 +38,11 @@ class SshjSftpApiIntegrationSpec
 
   def getClient(info: SftpLoginInfo = testLogin): Stream[IO, SftpApi] =
     Stream.resource(
-      SshjSftpApi.build(info, Blocker.liftExecutionContext(ExecutionContext.global))
+      SshjSftpApi.build(
+        info,
+        Blocker.liftExecutionContext(ExecutionContext.global),
+        maxRetries = 1
+      )
     )
 
   behavior of "SftpApi"
@@ -62,8 +66,8 @@ class SshjSftpApiIntegrationSpec
       .attempt
       .unsafeRunSync()
 
-    bytesOrError.left.value.getCause.getMessage should include(testLogin.host)
-    bytesOrError.left.value.getCause.getMessage should include(badPort.toString)
+    bytesOrError.left.value.getMessage should include(testLogin.host)
+    bytesOrError.left.value.getMessage should include(badPort.toString)
   }
 
   it should "raise a useful error if logging into a remote site fails" in {
@@ -75,8 +79,8 @@ class SshjSftpApiIntegrationSpec
       .attempt
       .unsafeRunSync()
 
-    bytesOrError.left.value.getCause.getMessage should include(testLogin.host)
-    bytesOrError.left.value.getCause.getMessage should include(badUser)
+    bytesOrError.left.value.getMessage should include(testLogin.host)
+    bytesOrError.left.value.getMessage should include(badUser)
   }
 
   it should "read ranges of remote files" in {

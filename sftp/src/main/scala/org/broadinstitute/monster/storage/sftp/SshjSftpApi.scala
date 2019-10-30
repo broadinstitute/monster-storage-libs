@@ -2,11 +2,13 @@ package org.broadinstitute.monster.storage.sftp
 
 import java.io.InputStream
 
+import cats.effect.concurrent.Ref
 import cats.effect.{Blocker, ContextShift, IO, Resource, Timer}
 import cats.implicits._
 import fs2.{Chunk, Stream}
 import io.chrisdavenport.log4cats.slf4j.Slf4jLogger
-import net.schmizz.sshj.SSHClient
+import net.schmizz.keepalive.KeepAliveProvider
+import net.schmizz.sshj.{DefaultConfig, SSHClient}
 import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.sftp.{
   FileMode,
@@ -16,6 +18,8 @@ import net.schmizz.sshj.sftp.{
 }
 import net.schmizz.sshj.transport.verification.PromiscuousVerifier
 import org.broadinstitute.monster.storage.common.{FileAttributes, FileType}
+import retry._
+import retry.CatsEffect._
 
 import scala.collection.JavaConverters._
 import scala.concurrent.duration._
@@ -56,28 +60,26 @@ private[sftp] class SshjSftpApi(
      */
     def readStream(start: Long, attemptsSoFar: Int): Stream[IO, Byte] =
       Stream.eval(logger.info(s"Opening $path at byte $start")) >>
-        Stream.resource(client.openRemoteFile(path, start)).flatMap { inStream =>
-          fs2.io
-            .readInputStream(IO.pure(inStream), readChunkSize, blocker)
-            .chunks
-            .attempt
-            .scan(start -> Either.right[Throwable, Chunk[Byte]](Chunk.empty)) {
-              case ((n, _), Right(bytes)) => (n + bytes.size, Right(bytes))
-              case ((n, _), Left(err))    => (n, Left(err))
-            }
-            .flatMap {
-              case (_, Right(bytes)) =>
-                Stream.chunk(bytes)
-              case (n, Left(err: SSHException)) if attemptsSoFar < maxRetries =>
-                val message =
-                  s"Hit connection error while reading $path, retrying after $retryDelay"
-                val logAndWait =
-                  logger.warn(err)(message).flatMap(_ => t.sleep(retryDelay))
-                Stream.eval(logAndWait) >> readStream(n, attemptsSoFar + 1)
-              case (_, Left(err)) =>
-                Stream.raiseError[IO](err)
-            }
-        }
+        fs2.io
+          .readInputStream(client.openRemoteFile(path, start), readChunkSize, blocker)
+          .chunks
+          .attempt
+          .scan(start -> Either.right[Throwable, Chunk[Byte]](Chunk.empty)) {
+            case ((n, _), Right(bytes)) => (n + bytes.size, Right(bytes))
+            case ((n, _), Left(err))    => (n, Left(err))
+          }
+          .flatMap {
+            case (_, Right(bytes)) =>
+              Stream.chunk(bytes)
+            case (n, Left(err: SSHException)) if attemptsSoFar < maxRetries =>
+              val message =
+                s"Hit connection error while reading $path, retrying after $retryDelay"
+              val logAndWait =
+                logger.warn(err)(message).flatMap(_ => t.sleep(retryDelay))
+              Stream.eval(logAndWait) >> readStream(n, attemptsSoFar + 1)
+            case (_, Left(err)) =>
+              Stream.raiseError[IO](err)
+          }
 
     val allBytes = readStream(fromByte, 0)
     untilByte
@@ -116,6 +118,8 @@ private[sftp] class SshjSftpApi(
 
 object SshjSftpApi {
 
+  private val logger = Slf4jLogger.getLogger[IO]
+
   private[sftp] val bytesPerKib = 1024
 
   /** Number of bytes to buffer in each chunk of data pulled from remote files. */
@@ -134,60 +138,56 @@ object SshjSftpApi {
   private[sftp] trait Client {
 
     /** Use SFTP to open an input stream for a remote file, starting at an offset. */
-    def openRemoteFile(path: String, offset: Long): Resource[IO, InputStream]
+    def openRemoteFile(path: String, offset: Long): IO[InputStream]
 
     /** Use SFTP to check if a remote file exists, returning its info if so. */
     def statRemoteFile(path: String): IO[Option[RawAttributes]]
 
     /** Use SFTP to list the contents of a remote directory. */
     def listRemoteDirectory(path: String): IO[List[RemoteResourceInfo]]
+
+    /** Close the machinery backing this client. */
+    def close(): IO[Unit]
   }
 
   /**
-    * Build a resource which will connect to a remote host over SSH, authenticate
-    * with the site, then create an SFTP client for the host.
+    * Connect to a remote host over SSH and authenticate with the site,
+    * returning the SSH client and a linked SFTP client.
     */
-  private def connectToHost(loginInfo: SftpLoginInfo, blocker: Blocker)(
+  private def connectToHost(
+    loginInfo: SftpLoginInfo,
+    blocker: Blocker,
+    maxPacketSize: Int
+  )(
     implicit cs: ContextShift[IO]
-  ): Resource[IO, SFTPClient] = {
-    val sshSetup = blocker
-      .blockOn(IO.delay(new SSHClient()))
-      .flatTap(ssh => IO.delay(ssh.addHostKeyVerifier(new PromiscuousVerifier())))
-    val sshTeardown = (ssh: SSHClient) => blocker.blockOn(IO.delay(ssh.close()))
+  ): IO[(SSHClient, SFTPClient)] = blocker.blockOn {
+    for {
+      ssh <- IO.delay {
+        val config = new DefaultConfig()
+        config.setKeepAliveProvider(KeepAliveProvider.KEEP_ALIVE)
 
-    Resource.make(sshSetup)(sshTeardown).flatMap { ssh =>
-      val sshConnect = blocker.blockOn {
-        for {
-          _ <- IO.delay(ssh.connect(loginInfo.host, loginInfo.port)).adaptError {
-            case err =>
-              new RuntimeException(
-                s"Failed to connect to ${loginInfo.host} on port ${loginInfo.port}",
-                err
-              )
-          }
-          _ <- IO
-            .delay(ssh.authPassword(loginInfo.username, loginInfo.password))
-            .adaptError {
-              case err =>
-                new RuntimeException(
-                  s"Failed to log into ${loginInfo.host} as ${loginInfo.username}",
-                  err
-                )
-            }
-        } yield {
-          ssh
-        }
+        val ssh = new SSHClient(config)
+        ssh.addHostKeyVerifier(new PromiscuousVerifier())
+        ssh.getConnection.setMaxPacketSize(maxPacketSize)
+        ssh
       }
-      val sshDisconnect =
-        (ssh: SSHClient) => blocker.blockOn(IO.delay(ssh.disconnect()))
-
-      Resource.make(sshConnect)(sshDisconnect).flatMap { connectedSsh =>
-        val sftpSetup = blocker.blockOn(IO.delay(connectedSsh.newSFTPClient()))
-        val sftpTeardown =
-          (sftp: SFTPClient) => blocker.blockOn(IO.delay(sftp.close()))
-
-        Resource.make(sftpSetup)(sftpTeardown)
+      _ <- IO.delay(ssh.connect(loginInfo.host, loginInfo.port)).adaptError {
+        case err =>
+          new RuntimeException(
+            s"Failed to connect to ${loginInfo.host} on port ${loginInfo.port}",
+            err
+          )
       }
+      _ <- IO.delay(ssh.authPassword(loginInfo.username, loginInfo.password)).adaptError {
+        case err =>
+          new RuntimeException(
+            s"Failed to log into ${loginInfo.host} as ${loginInfo.username}",
+            err
+          )
+      }
+      sftp <- IO.delay(ssh.newSFTPClient())
+    } yield {
+      (ssh, sftp)
     }
   }
 
@@ -209,33 +209,102 @@ object SshjSftpApi {
     implicit cs: ContextShift[IO],
     t: Timer[IO]
   ): Resource[IO, SftpApi] = {
-    /*
-     * NOTE: sshj's client is thread-safe, but long-lived SSH sessions are still
-     * liable to be terminated at any time, so to make our lives easy we create
-     * a new client / connection per request. If we see a ton of overhead, we might
-     * want to investigate maintaining a pool of connected clients.
-     */
-    val realClient = new Client {
-      override def openRemoteFile(path: String, offset: Long): Resource[IO, InputStream] =
-        connectToHost(loginInfo, blocker).evalMap { sftp =>
-          blocker.blockOn(IO.delay(sftp.open(path))).map { file =>
-            new file.ReadAheadRemoteFileInputStream(readAhead, offset)
+    val connectionRetryPolicy = RetryPolicies
+      .constantDelay[IO](retryDelay)
+      .join(RetryPolicies.limitRetries[IO](maxRetries))
+
+    // Error handler for initial SSH connection attempts.
+    // Nothing meaningful to do here but log.
+    def handleConnectionError(err: Throwable, details: RetryDetails): IO[Unit] =
+      details match {
+        case RetryDetails.WillDelayAndRetry(nextDelay, retriesSoFar, cumulativeDelay) =>
+          logger.warn(err)(
+            s"Failed to make SFTP connection after $retriesSoFar attempts ($cumulativeDelay), will try again in $nextDelay"
+          )
+        case RetryDetails.GivingUp(totalRetries, totalDelay) =>
+          logger.error(err)(
+            s"Failed to make SFTP connection after $totalRetries attempts ($totalDelay)"
+          )
+      }
+
+    // Utility to set up a new SSH/SFTP connection, with baked-in retry logic & logging.
+    def connect(): IO[(SSHClient, SFTPClient)] =
+      retryingOnAllErrors(
+        policy = connectionRetryPolicy,
+        onError = handleConnectionError
+      )(connectToHost(loginInfo, blocker, readChunkSize))
+
+    val setup = connect().flatMap {
+      case (initSsh, initSftp) =>
+        /*
+         * For efficiency, we want to keep our SSH / SFTP clients open for as long as possible.
+         * Since there's always a chance that some error will cause a long-lived connection to
+         * be terminated (and the SSH library we're using doesn't support client reuse after disconnect),
+         * we have to support swapping out the "active" clients at runtime.
+         *
+         * Begin by initializing a ~mutable Ref containing the first clients-to-use.
+         */
+        Ref[IO].of((initSsh, initSftp)).map { clientsRef =>
+          // Utility to tear down the clients currently held by our reference.
+          def closeSftp(): IO[Unit] = clientsRef.get.flatMap {
+            case (ssh, sftp) =>
+              blocker.blockOn {
+                IO.delay {
+                  sftp.close()
+                  ssh.close()
+                }
+              }
           }
-        }
 
-      override def statRemoteFile(path: String): IO[Option[RawAttributes]] =
-        connectToHost(loginInfo, blocker).use { sftp =>
-          IO.delay(sftp.statExistence(path)).map(Option.apply)
-        }
+          // Run a function using a connected SFTP client.
+          // If the currently-cached client has been disconnected, this method
+          // will replace it with a new client before running the provided function.
+          def useSftp[A](f: SFTPClient => IO[A]): IO[A] =
+            for {
+              (ssh, sftp) <- clientsRef.get
+              sftpToUse <- if (ssh.isConnected && ssh.isAuthenticated) {
+                IO.pure(sftp)
+              } else {
+                for {
+                  _ <- closeSftp()
+                  (newSsh, newSftp) <- connect()
+                  _ <- clientsRef.set((newSsh, newSftp))
+                } yield {
+                  newSftp
+                }
+              }
+              out <- f(sftpToUse)
+            } yield {
+              out
+            }
 
-      override def listRemoteDirectory(path: String): IO[List[RemoteResourceInfo]] =
-        connectToHost(loginInfo, blocker).use { sftp =>
-          IO.delay(sftp.ls(path)).map(_.asScala.toList)
+          /*
+           * NOTE: sshj's client is thread-safe, but long-lived SSH sessions are still
+           * liable to be terminated at any time, so to make our lives easy we create
+           * a new client / connection per request. If we see a ton of overhead, we might
+           * want to investigate maintaining a pool of connected clients.
+           */
+          new Client {
+            override def openRemoteFile(path: String, offset: Long): IO[InputStream] =
+              useSftp { sftp =>
+                blocker.blockOn(IO.delay(sftp.open(path))).map { file =>
+                  new file.ReadAheadRemoteFileInputStream(readAhead, offset)
+                }
+              }
+
+            override def statRemoteFile(path: String): IO[Option[RawAttributes]] =
+              useSftp(sftp => IO.delay(sftp.statExistence(path)).map(Option.apply))
+
+            override def listRemoteDirectory(path: String): IO[List[RemoteResourceInfo]] =
+              useSftp(sftp => IO.delay(sftp.ls(path)).map(_.asScala.toList))
+
+            override def close(): IO[Unit] = closeSftp()
+          }
         }
     }
 
-    Resource.pure(
-      new SshjSftpApi(realClient, blocker, readChunkSize, maxRetries, retryDelay)
-    )
+    Resource
+      .make(setup)(_.close())
+      .map(new SshjSftpApi(_, blocker, readChunkSize, maxRetries, retryDelay))
   }
 }
