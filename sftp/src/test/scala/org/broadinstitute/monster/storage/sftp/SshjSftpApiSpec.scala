@@ -2,7 +2,7 @@ package org.broadinstitute.monster.storage.sftp
 
 import java.io.{ByteArrayInputStream, IOException, InputStream}
 
-import cats.effect.{Blocker, ContextShift, IO, Resource, Timer}
+import cats.effect.{Blocker, ContextShift, IO, Timer}
 import net.schmizz.sshj.common.SSHException
 import net.schmizz.sshj.sftp.{
   FileMode,
@@ -38,7 +38,7 @@ class SshjSftpApiSpec
     val fakeSftp = mock[SshjSftpApi.Client]
     (fakeSftp.openRemoteFile _)
       .expects(fakePath, 0L)
-      .returning(Resource.pure(new ByteArrayInputStream(fakeContents.getBytes())))
+      .returning(IO.pure(new ByteArrayInputStream(fakeContents.getBytes())))
 
     val api =
       new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 0, Duration.Zero)
@@ -54,7 +54,7 @@ class SshjSftpApiSpec
     val fakeSftp = mock[SshjSftpApi.Client]
     (fakeSftp.openRemoteFile _)
       .expects(fakePath, expectedOffset.toLong)
-      .returning(Resource.pure(new ByteArrayInputStream(expectedBytes)))
+      .returning(IO.pure(new ByteArrayInputStream(expectedBytes)))
 
     val api =
       new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 0, Duration.Zero)
@@ -68,7 +68,7 @@ class SshjSftpApiSpec
     val fakeSftp = mock[SshjSftpApi.Client]
     (fakeSftp.openRemoteFile _)
       .expects(fakePath, 0L)
-      .returning(Resource.pure(new ByteArrayInputStream(fakeContents.getBytes())))
+      .returning(IO.pure(new ByteArrayInputStream(fakeContents.getBytes())))
 
     val api =
       new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 0, Duration.Zero)
@@ -89,7 +89,7 @@ class SshjSftpApiSpec
     val fakeSftp = mock[SshjSftpApi.Client]
     (fakeSftp.openRemoteFile _)
       .expects(fakePath, expectedOffset)
-      .returning(Resource.pure(new ByteArrayInputStream(expectedBytes)))
+      .returning(IO.pure(new ByteArrayInputStream(expectedBytes)))
 
     val api =
       new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 0, Duration.Zero)
@@ -133,10 +133,10 @@ class SshjSftpApiSpec
     val fakeSftp = mock[SshjSftpApi.Client]
     (fakeSftp.openRemoteFile _)
       .expects(fakePath, expectedOffset.toLong)
-      .returning(Resource.pure(inStream1))
+      .returning(IO.pure(inStream1))
     (fakeSftp.openRemoteFile _)
       .expects(fakePath, failurePoint.toLong)
-      .returning(Resource.pure(inStream2))
+      .returning(IO.pure(inStream2))
 
     val api =
       new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 1, Duration.Zero)
@@ -165,7 +165,7 @@ class SshjSftpApiSpec
     val fakeSftp = mock[SshjSftpApi.Client]
     (fakeSftp.openRemoteFile _)
       .expects(fakePath, 0L)
-      .returning(Resource.pure(inStream))
+      .returning(IO.pure(inStream))
 
     val api =
       new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 1, Duration.Zero)
@@ -194,10 +194,10 @@ class SshjSftpApiSpec
     val fakeSftp = mock[SshjSftpApi.Client]
     (fakeSftp.openRemoteFile _)
       .expects(fakePath, expectedOffset.toLong)
-      .returning(Resource.pure(inStream1))
+      .returning(IO.pure(inStream1))
     (fakeSftp.openRemoteFile _)
       .expects(fakePath, failurePoint.toLong)
-      .returning(Resource.pure(inStream1))
+      .returning(IO.pure(inStream1))
 
     val api =
       new SshjSftpApi(fakeSftp, blocker, fakeChunkSize, 1, Duration.Zero)
