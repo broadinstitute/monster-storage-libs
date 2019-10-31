@@ -33,14 +33,14 @@ import scala.concurrent.duration._
   *                      fs2 streams
   * @param maxRetries max times to reopen a remote connection after the server severs the data
   *                   connection
-  * @param retryDelay time to sleep between attempts
+  * @param maxRetryDelay max time to sleep between attempts
   */
 private[sftp] class SshjSftpApi(
   client: SshjSftpApi.Client,
   blocker: Blocker,
   readChunkSize: Int,
   maxRetries: Int,
-  retryDelay: FiniteDuration
+  maxRetryDelay: FiniteDuration
 )(implicit cs: ContextShift[IO], t: Timer[IO])
     extends SftpApi {
 
@@ -72,10 +72,15 @@ private[sftp] class SshjSftpApi(
             case (_, Right(bytes)) =>
               Stream.chunk(bytes)
             case (n, Left(err: SSHException)) if attemptsSoFar < maxRetries =>
+              val delay = maxRetryDelay.min(math.pow(2.0, attemptsSoFar.toDouble).seconds)
               val message =
-                s"Hit connection error while reading $path, retrying after $retryDelay"
-              val logAndWait =
-                logger.warn(err)(message).flatMap(_ => t.sleep(retryDelay))
+                s"Hit connection error while reading $path, retrying after $delay"
+              val logAndWait = for {
+                _ <- logger.warn(err)(message)
+                _ <- client.reset()
+                _ <- t.sleep(delay)
+              } yield ()
+
               Stream.eval(logAndWait) >> readStream(n, attemptsSoFar + 1)
             case (_, Left(err)) =>
               Stream.raiseError[IO](err)
@@ -146,6 +151,9 @@ object SshjSftpApi {
     /** Use SFTP to list the contents of a remote directory. */
     def listRemoteDirectory(path: String): IO[List[RemoteResourceInfo]]
 
+    /** Reset (close and re-create) the machinery backing this client. */
+    def reset(): IO[Unit]
+
     /** Close the machinery backing this client. */
     def close(): IO[Unit]
   }
@@ -203,15 +211,17 @@ object SshjSftpApi {
     blocker: Blocker,
     readChunkSize: Int = DefaultReadChunkSize,
     maxRetries: Int = DefaultMaxRetries,
-    retryDelay: FiniteDuration = DefaultRetryDelay,
+    maxRetryDelay: FiniteDuration = DefaultRetryDelay,
     readAhead: Int = DefaultReadAhead
   )(
     implicit cs: ContextShift[IO],
     t: Timer[IO]
   ): Resource[IO, SftpApi] = {
-    val connectionRetryPolicy = RetryPolicies
-      .constantDelay[IO](retryDelay)
-      .join(RetryPolicies.limitRetries[IO](maxRetries))
+    val connectionRetryPolicy =
+      RetryPolicies.limitRetries[IO](maxRetries).join {
+        RetryPolicies
+          .capDelay(maxRetryDelay, RetryPolicies.exponentialBackoff(1.second))
+      }
 
     // Error handler for initial SSH connection attempts.
     // Nothing meaningful to do here but log.
@@ -256,6 +266,16 @@ object SshjSftpApi {
               }
           }
 
+          // Utility to replace the cached clients held by our reference.
+          def resetSftp(): IO[SFTPClient] =
+            for {
+              _ <- closeSftp()
+              (newSsh, newSftp) <- connect()
+              _ <- clientsRef.set((newSsh, newSftp))
+            } yield {
+              newSftp
+            }
+
           // Run a function using a connected SFTP client.
           // If the currently-cached client has been disconnected, this method
           // will replace it with a new client before running the provided function.
@@ -265,13 +285,7 @@ object SshjSftpApi {
               sftpToUse <- if (ssh.isConnected && ssh.isAuthenticated) {
                 IO.pure(sftp)
               } else {
-                for {
-                  _ <- closeSftp()
-                  (newSsh, newSftp) <- connect()
-                  _ <- clientsRef.set((newSsh, newSftp))
-                } yield {
-                  newSftp
-                }
+                resetSftp()
               }
               out <- f(sftpToUse)
             } yield {
@@ -298,6 +312,8 @@ object SshjSftpApi {
             override def listRemoteDirectory(path: String): IO[List[RemoteResourceInfo]] =
               useSftp(sftp => IO.delay(sftp.ls(path)).map(_.asScala.toList))
 
+            override def reset(): IO[Unit] = resetSftp().void
+
             override def close(): IO[Unit] = closeSftp()
           }
         }
@@ -305,6 +321,6 @@ object SshjSftpApi {
 
     Resource
       .make(setup)(_.close())
-      .map(new SshjSftpApi(_, blocker, readChunkSize, maxRetries, retryDelay))
+      .map(new SshjSftpApi(_, blocker, readChunkSize, maxRetries, maxRetryDelay))
   }
 }
