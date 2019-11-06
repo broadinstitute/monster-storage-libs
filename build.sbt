@@ -33,7 +33,7 @@ lazy val `monster-storage-libs` = project
 
 lazy val `common-lib` = project
   .in(file("common"))
-  .enablePlugins(LibraryPlugin)
+  .enablePlugins(MonsterLibraryPlugin)
   .settings(
     libraryDependencies ++= Seq(
       "com.beachape" %% "enumeratum" % enumeratumVersion
@@ -42,7 +42,7 @@ lazy val `common-lib` = project
 
 lazy val `gcs-lib` = project
   .in(file("gcs"))
-  .enablePlugins(LibraryPlugin)
+  .enablePlugins(MonsterLibraryPlugin)
   .dependsOn(`common-lib`)
   .settings(
     // Main code.
@@ -76,7 +76,7 @@ lazy val `gcs-lib` = project
 
 lazy val `ftp-lib` = project
   .in(file("ftp"))
-  .enablePlugins(LibraryPlugin)
+  .enablePlugins(MonsterLibraryPlugin)
   .dependsOn(`common-lib`)
   .settings(
     libraryDependencies ++= Seq(
@@ -102,7 +102,7 @@ lazy val `ftp-lib` = project
 
 lazy val `sftp-lib` = project
   .in(file("sftp"))
-  .enablePlugins(LibraryPlugin)
+  .enablePlugins(MonsterLibraryPlugin)
   .dependsOn(`common-lib`)
   .settings(
     libraryDependencies ++= Seq(

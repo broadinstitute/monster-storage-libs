@@ -43,7 +43,6 @@ private[sftp] class SshjSftpApi(
   maxRetryDelay: FiniteDuration
 )(implicit cs: ContextShift[IO], t: Timer[IO])
     extends SftpApi {
-
   private val logger = Slf4jLogger.getLogger[IO]
 
   override def readFile(
@@ -51,7 +50,6 @@ private[sftp] class SshjSftpApi(
     fromByte: Long = 0L,
     untilByte: Option[Long] = None
   ): Stream[IO, Byte] = {
-
     /*
      * Helper method used to stream the contents of `path` from a start position.
      *
@@ -122,7 +120,6 @@ private[sftp] class SshjSftpApi(
 }
 
 object SshjSftpApi {
-
   private val logger = Slf4jLogger.getLogger[IO]
 
   private[sftp] val bytesPerKib = 1024
@@ -141,7 +138,6 @@ object SshjSftpApi {
 
   /** Thin abstraction over sshj's `SFTPClient`, to enable mocking calls in unit tests. */
   private[sftp] trait Client {
-
     /** Use SFTP to open an input stream for a remote file, starting at an offset. */
     def openRemoteFile(path: String, offset: Long): IO[InputStream]
 

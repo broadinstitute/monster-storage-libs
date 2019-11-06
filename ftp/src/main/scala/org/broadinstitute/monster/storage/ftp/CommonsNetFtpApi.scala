@@ -29,7 +29,6 @@ private[ftp] class CommonsNetFtpApi(
   retryDelay: FiniteDuration
 )(implicit cs: ContextShift[IO], t: Timer[IO])
     extends FtpApi {
-
   private val logger = Slf4jLogger.getLogger[IO]
 
   override def readFile(
@@ -37,7 +36,6 @@ private[ftp] class CommonsNetFtpApi(
     fromByte: Long = 0L,
     untilByte: Option[Long] = None
   ): Stream[IO, Byte] = {
-
     /*
      * Helper method used to stream the contents of `path` from a start position.
      *
@@ -120,7 +118,6 @@ private[ftp] class CommonsNetFtpApi(
 }
 
 object CommonsNetFtpApi {
-
   private[ftp] val bytesPerKib = 1024
   private[ftp] val bytesPerMib = 1024 * bytesPerKib
 
@@ -142,7 +139,6 @@ object CommonsNetFtpApi {
 
   /** Thin abstraction over commons-net's `FTPClient`, to enable mocking calls in unit tests. */
   private[ftp] trait Client {
-
     /**
       * Use FTP to open an input stream for a remote file, starting at an offset.
       *

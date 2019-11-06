@@ -25,7 +25,6 @@ class GcsAuthProviderSpec extends FlatSpec with Matchers {
   behavior of "GcsAuthProvider"
 
   it should "initialize fresh credentials" in {
-
     val googleCreds = new OAuth2Credentials {
       override def refreshAccessToken(): AccessToken =
         new AccessToken("the-token", new Date(1500L))
@@ -46,7 +45,6 @@ class GcsAuthProviderSpec extends FlatSpec with Matchers {
   }
 
   it should "refresh expired credentials" in {
-
     val token1 = new AccessToken("the-token", new Date(122L))
     val token2 = new AccessToken("the-token2", new Date(1500L))
 
@@ -69,7 +67,6 @@ class GcsAuthProviderSpec extends FlatSpec with Matchers {
   }
 
   it should "not refresh valid credentials" in {
-
     val token = new AccessToken("the-token", new Date(1500L))
 
     val googleCreds = new OAuth2Credentials(token) {
@@ -91,7 +88,6 @@ class GcsAuthProviderSpec extends FlatSpec with Matchers {
   }
 
   it should "refresh once on concurrent access" in {
-
     val initToken = new AccessToken("the-token", new Date(122L))
     val ref = new AtomicReference[AccessToken](initToken)
 

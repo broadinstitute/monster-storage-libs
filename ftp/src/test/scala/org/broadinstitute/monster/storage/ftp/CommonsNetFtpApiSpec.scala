@@ -16,7 +16,6 @@ class CommonsNetFtpApiSpec
     with Matchers
     with MockFactory
     with EitherValues {
-
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
   private implicit val t: Timer[IO] = IO.timer(ExecutionContext.global)
 

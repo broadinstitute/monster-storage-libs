@@ -22,7 +22,6 @@ class SshjSftpApiSpec
     with MockFactory
     with EitherValues
     with OptionValues {
-
   private implicit val cs: ContextShift[IO] = IO.contextShift(ExecutionContext.global)
   private implicit val t: Timer[IO] = IO.timer(ExecutionContext.global)
 

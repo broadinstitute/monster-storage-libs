@@ -317,7 +317,6 @@ private[gcs] class JsonHttpGcsApi(
     chunkSize: Int,
     data: Stream[IO, Byte]
   ): IO[Either[Long, Unit]] = {
-
     // Helper method to incrementally push data from the input stream to GCS.
     def pushChunks(start: Long, data: Stream[IO, Byte]): Pull[IO, Nothing, Option[Long]] =
       // Pull the first chunk of data off the front of the stream.
@@ -406,7 +405,6 @@ private[gcs] class JsonHttpGcsApi(
     path: String,
     pageSize: Int
   ): Stream[IO, (String, FileType)] = {
-
     // Helper for pulling a single page of list results.
     def pullNextPage(
       maybePrevToken: Option[String]
@@ -561,7 +559,6 @@ private[gcs] class JsonHttpGcsApi(
 }
 
 object JsonHttpGcsApi {
-
   private[gcs] val bytesPerMib = 1024 * 1024
 
   /** Default chunk size used for reading data from GCS. */

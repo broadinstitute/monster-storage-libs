@@ -6,7 +6,6 @@ import org.apache.commons.net.{ProtocolCommandEvent, ProtocolCommandListener}
 
 /** Logging adapter for commons-net's FTP event-listener infrastructure. */
 object FtpEventLogger extends ProtocolCommandListener {
-
   private val logger = Slf4jLogger.getLogger[IO]
 
   override def protocolCommandSent(event: ProtocolCommandEvent): Unit = {

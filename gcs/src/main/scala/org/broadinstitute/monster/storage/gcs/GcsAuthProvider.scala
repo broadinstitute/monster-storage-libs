@@ -17,7 +17,6 @@ import org.http4s.headers.Authorization
   * Utility which can add authorization info for Google Cloud to outgoing HTTP requests.
   */
 trait GcsAuthProvider {
-
   /** Add authorization for GCP to an HTTP request. */
   def addAuth(request: Request[IO]): IO[Request[IO]]
 }
@@ -105,7 +104,6 @@ object GcsAuthProvider {
       * and refresh it if so.
       */
     private def maybeRefreshToken(now: Instant): IO[Unit] = {
-
       val maybeExpirationInstant = for {
         token <- Option(googleCreds.getAccessToken)
         expiration <- Option(token.getExpirationTime)
